@@ -13,7 +13,7 @@ import streamlit as st
 
 from uhpc_core import (
     BINDER_CHOICES, POLICY_CHOICES, DEFAULT_DENSITIES, DEFAULT_FIXED, FEATURES_15, LABELS, MATERIALS,
-    NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings,
+    NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings, mass_percentages,
     check_model_columns, count_training_matches, feature_frame, feature_importance_table, material_policies, optimize_mix, physical_quantities,
     predict, training_bounds_from_df,
 )
@@ -71,17 +71,37 @@ def float_display(x: float, precision: int = 3) -> str:
 
 
 def display_mix(mix: dict[str, float], mode: str, amount: float, suffix: str) -> None:
+    """Hiển thị khối lượng từng vật liệu và tỷ trọng cốt liệu trên TỔNG hỗn hợp."""
     tab, _ = batch_table(mix, mode, amount)
     df = tab.copy()
-    total = pd.DataFrame([{
+    percentages = mass_percentages(mix)
+    pct_aggregate = float(percentages["Cat"])
+    aggregate_mass = float(df.loc[df["Vật liệu"].eq(LABELS["Cat"]), "Khối lượng mẻ (kg)"].iloc[0])
+    total_kg_m3 = float(df["Định lượng (kg/m³)"].sum())
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Cốt liệu / tổng khối lượng", f"{pct_aggregate:.2f}%", help="Tính từ trường Cat / tổng 9 vật liệu theo kg/m³.")
+    c2.metric("Cốt liệu trong mẻ", f"{aggregate_mass:,.3f} kg")
+    c3.metric("Tổng khối lượng cấp phối", f"{total_kg_m3:,.2f} kg/m³")
+    st.progress(pct_aggregate / 100.0, text=f"Cát/cốt liệu chiếm {pct_aggregate:.2f}% tổng khối lượng vật liệu")
+    st.caption("% khối lượng = khối lượng vật liệu (kg/m³) ÷ tổng khối lượng của 9 vật liệu (kg/m³) × 100. "
+               "Cốt liệu = biến `Cat` theo dữ liệu gốc; không tính bột thạch anh (chất độn) hoặc sợi thép (cốt gia cường). "
+               "Đây là tỷ lệ theo khối lượng, không phải tỷ lệ theo thể tích hay % độ quan trọng AI.")
+
+    df = pd.concat([df, pd.DataFrame([{
         "Vật liệu": "TỔNG", "Định lượng (kg/m³)": df["Định lượng (kg/m³)"].sum(),
         "Khối lượng mẻ (kg)": df["Khối lượng mẻ (kg)"].sum(),
-    }])
-    df = pd.concat([df, total], ignore_index=True)
-    st.dataframe(df.style.format({"Định lượng (kg/m³)": "{:,.2f}", "Khối lượng mẻ (kg)": "{:,.3f}"}),
-                 use_container_width=True, hide_index=True)
+        "Tỷ lệ khối lượng (%)": 100.0,
+    }])], ignore_index=True)
+    st.dataframe(df.style.format({
+        "Định lượng (kg/m³)": "{:,.2f}", "Khối lượng mẻ (kg)": "{:,.3f}",
+        "Tỷ lệ khối lượng (%)": "{:.2f}%",
+    }), use_container_width=True, hide_index=True)
+    with st.expander("📊 Xem biểu đồ % khối lượng các vật liệu", expanded=False):
+        st.bar_chart(tab.set_index("Vật liệu")[["Tỷ lệ khối lượng (%)"]], horizontal=True)
+        st.caption("Biểu đồ này là tỷ lệ vật liệu trong cấp phối thực tế, KHÁC với tab 'Ảnh hưởng vật liệu' về Feature Importance.")
     csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("⬇️ Xuất bảng cấp phối CSV", data=csv_bytes,
+    st.download_button("⬇️ Xuất bảng cấp phối CSV (có % khối lượng)", data=csv_bytes,
                        file_name=f"UHPC_cap_phoi_{suffix}.csv", mime="text/csv", key=f"dl_{suffix}")
 
 

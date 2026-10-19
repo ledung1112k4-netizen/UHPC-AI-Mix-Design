@@ -312,12 +312,26 @@ def predict(model: Any, mix: dict[str, float], age: float, fixed: dict[str, floa
     return float(result[0])
 
 
+def mass_percentages(mix: dict[str, float]) -> pd.Series:
+    """% khối lượng 9 vật liệu, tính theo tổng kg/m³ (không phải feature importance).
+
+    Cốt liệu trong cấu trúc dữ liệu hiện tại ứng với trường `Cat`;
+    bột thạch anh là chất độn, sợi thép là cốt gia cường, không cộng vào cốt liệu.
+    """
+    masses = pd.Series({k: float(mix[k]) for k in MATERIALS}, dtype=float)
+    if not np.isfinite(masses.to_numpy()).all() or (masses < 0).any():
+        raise ValueError("Khối lượng vật liệu phải là các số hữu hạn không âm.")
+    total = float(masses.sum())
+    if total <= 0:
+        raise ValueError("Tổng khối lượng vật liệu phải lớn hơn 0.")
+    return masses / total * 100.0
+
+
 def batch_table(mix: dict[str, float], mode: str, amount: float) -> tuple[pd.DataFrame, float]:
     if not np.isfinite(amount) or amount <= 0:
         raise ValueError("Khối lượng/thể tích mẻ trộn phải lớn hơn 0.")
+    mass_pct = mass_percentages(mix)
     total_mass = sum(float(mix[k]) for k in MATERIALS)
-    if total_mass <= 0:
-        raise ValueError("Tổng khối lượng vật liệu phải lớn hơn 0.")
     if mode == "kg":
         coefficient = float(amount) / total_mass
     elif mode == "m3":
@@ -328,6 +342,7 @@ def batch_table(mix: dict[str, float], mode: str, amount: float) -> tuple[pd.Dat
         "Vật liệu": [LABELS[k] for k in MATERIALS],
         "Định lượng (kg/m³)": [float(mix[k]) for k in MATERIALS],
         "Khối lượng mẻ (kg)": [float(mix[k]) * coefficient for k in MATERIALS],
+        "Tỷ lệ khối lượng (%)": [float(mass_pct[k]) for k in MATERIALS],
     })
     return table, coefficient
 
