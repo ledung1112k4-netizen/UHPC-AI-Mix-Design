@@ -12,9 +12,9 @@ import pandas as pd
 import streamlit as st
 
 from uhpc_core import (
-    DEFAULT_DENSITIES, DEFAULT_FIXED, FEATURES_15, LABELS, MATERIALS,
+    BINDER_CHOICES, POLICY_CHOICES, DEFAULT_DENSITIES, DEFAULT_FIXED, FEATURES_15, LABELS, MATERIALS,
     NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings,
-    check_model_columns, feature_frame, optimize_mix, physical_quantities,
+    check_model_columns, count_training_matches, feature_frame, material_policies, optimize_mix, physical_quantities,
     predict, training_bounds_from_df,
 )
 
@@ -101,7 +101,7 @@ st.markdown("""
 <small>UHPC STUDIO • AI-ASSISTED MIX DESIGN</small>
 <h1>Thiết kế cấp phối bê tông UHPC</h1>
 <p>Dự đoán cường độ nén và đề xuất cấp phối có tro bay &amp; xỉ lò cao,
-ưu tiên mục tiêu 120 MPa tại 28 ngày. Không cần mở Google Colab sau khi triển khai.</p>
+lựa chọn tổ hợp chất liên kết linh hoạt, ưu tiên 120 MPa tại 28 ngày. Không cần mở Google Colab sau khi triển khai.</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -118,13 +118,15 @@ if model_path:
 
 training_path = find_existing(TRAINING_PATHS)
 training_bounds = None
+training = None
 training_error = None
 if model is not None:
     try:
+        if training_path:
+            training = load_training(str(training_path), training_path.stat().st_mtime_ns)
         if "feature_bounds" in bundle:
             training_bounds = {str(k): tuple(map(float, v)) for k, v in bundle["feature_bounds"].items()}
-        elif training_path:
-            training = load_training(str(training_path), training_path.stat().st_mtime_ns)
+        elif training is not None:
             training_bounds = training_bounds_from_df(training, features)
     except Exception as exc:
         training_error = str(exc)
@@ -172,8 +174,55 @@ tab_inverse, tab_forward, tab_method = st.tabs([
 ])
 
 with tab_inverse:
-    st.subheader("Thiết kế ngược — tìm cấp phối có FA + GGBFS")
-    st.write("Thuật toán **Differential Evolution theo lô** tìm phương án giảm xi măng, trong khi yêu cầu dự đoán AI đạt tối thiểu ngưỡng mục tiêu và kiểm tra tỷ lệ W/B, thể tích tuyệt đối.")
+    st.subheader("Thiết kế ngược — lựa chọn tổ hợp chất liên kết")
+    st.write(
+        "**Differential Evolution theo lô** tối ưu lượng xi măng, đồng thời kiểm tra "
+        "cường độ AI mục tiêu, W/B, thể tích và đúng vật liệu đã chọn. "
+        "Các chế độ ít dữ liệu thực nghiệm có thể bị từ chối tối ưu để tránh ngoại suy."
+    )
+    binder_mode = st.selectbox(
+        "**Lựa chọn tổ hợp chất liên kết**",
+        options=list(BINDER_CHOICES),
+        format_func=lambda value: BINDER_CHOICES[value],
+        key="binder_mode_selector",
+        help="Tùy chọn Chỉ xi măng có nghĩa FA=0 và GGBFS=0; silica fume được đặt riêng bên dưới.",
+    )
+    custom_fa = "required"
+    custom_gg = "required"
+    if binder_mode == "CUSTOM":
+        cfa, cgg = st.columns(2)
+        custom_fa = cfa.selectbox(
+            "Trạng thái tro bay", list(POLICY_CHOICES),
+            format_func=lambda value: POLICY_CHOICES[value], key="custom_fa_selector",
+        )
+        custom_gg = cgg.selectbox(
+            "Trạng thái GGBFS", list(POLICY_CHOICES),
+            format_func=lambda value: POLICY_CHOICES[value], key="custom_gg_selector",
+        )
+    with st.expander("Silica fume và bột thạch anh — cài đặt riêng", expanded=True):
+        csf, cqp = st.columns(2)
+        silica_mode = csf.selectbox(
+            "Silica fume", list(POLICY_CHOICES), index=1,
+            format_func=lambda value: POLICY_CHOICES[value], key="silica_policy_selector",
+        )
+        quartz_mode = cqp.selectbox(
+            "Bột thạch anh (chất độn)", list(POLICY_CHOICES), index=1,
+            format_func=lambda value: POLICY_CHOICES[value], key="quartz_policy_selector",
+        )
+        st.caption("Bột thạch anh là chất độn, không được tính là chất liên kết trong W/B quy ước. Chọn 'Không sử dụng' sẽ cố định lượng vật liệu bằng 0 kg/m³.")
+
+    choice_key = (binder_mode, custom_fa, custom_gg, silica_mode, quartz_mode)
+    if binder_mode == "BOTH":
+        fa_policy, gg_policy = "required", "required"
+    elif binder_mode == "FA_ONLY":
+        fa_policy, gg_policy = "required", "off"
+    elif binder_mode == "GGBFS_ONLY":
+        fa_policy, gg_policy = "off", "required"
+    elif binder_mode == "CEMENT_ONLY":
+        fa_policy, gg_policy = "off", "off"
+    else:
+        fa_policy, gg_policy = custom_fa, custom_gg
+
     with st.form("optimization"):
         left, mid, right = st.columns(3)
         target = left.number_input("Cường độ nén mục tiêu (MPa)", min_value=40.0, max_value=250.0, value=120.0, step=5.0)
@@ -185,31 +234,57 @@ with tab_inverse:
             wb_min = a.number_input("W/B tối thiểu", min_value=0.05, max_value=0.50, value=0.14, step=0.01, format="%.2f")
             wb_max = b.number_input("W/B tối đa", min_value=0.05, max_value=0.50, value=0.24, step=0.01, format="%.2f")
             margin = c.number_input("Biên dự phòng AI (MPa)", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-            a2, b2, c2, d2 = st.columns(4)
-            min_fa = a2.number_input("Tro bay tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0)
-            min_gg = b2.number_input("GGBFS tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0)
+            a2, b2 = st.columns(2)
+            min_fa = a2.number_input("Tro bay tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0) if fa_policy == "required" else 20.0
+            min_gg = b2.number_input("GGBFS tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0) if gg_policy == "required" else 20.0
+            a3, b3 = st.columns(2)
+            min_sf = a3.number_input("Silica fume tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0) if silica_mode == "required" else 20.0
+            min_qp = b3.number_input("Bột thạch anh tối thiểu (kg/m³)", min_value=0.01, max_value=1000.0, value=20.0, step=5.0) if quartz_mode == "required" else 20.0
+            c2, d2 = st.columns(2)
             air_percent = c2.number_input("Khí giả định (%)", min_value=0.0, max_value=15.0, value=2.0, step=0.5)
             vol_tol = d2.number_input("Sai số thể tích (m³)", min_value=0.005, max_value=0.1, value=0.02, step=0.005, format="%.3f")
         run_opt = st.form_submit_button("🔎 Tìm cấp phối với mô hình AI", type="primary", disabled=(model is None or training_bounds is None), use_container_width=True)
-    st.caption("Các giới hạn W/B, FA, GGBFS, khí và thể tích là điều kiện sàng lọc **người dùng điều chỉnh**, không tự nhận là yêu cầu bắt buộc của tiêu chuẩn.")
+    st.caption(
+        "Giới hạn vật liệu, W/B và thể tích là điều kiện sàng lọc người dùng lựa chọn; "
+        "không mặc nhiên là yêu cầu tiêu chuẩn. Tổ hợp có mẫu huấn luyện không có nghĩa cấp phối mới đã được kiểm chứng."
+    )
     if run_opt:
         try:
-            rules = DesignRules(wb_min=wb_min, wb_max=wb_max, air_fraction=air_percent/100.0,
+            rules = DesignRules(
+                wb_min=wb_min, wb_max=wb_max, air_fraction=air_percent / 100.0,
                 volume_tolerance=vol_tol, min_flyash=min_fa, min_ggbfs=min_gg,
-                margin_mpa=margin)
-            with st.spinner("Đang đánh giá các cấp phối từ mô hình thật và kiểm tra ràng buộc..."):
-                result = optimize_mix(model, features, training_bounds, float(age), fixed, densities,
-                                      rules, target, max_cement, mode=mode)
+                margin_mpa=margin, binder_mode=binder_mode,
+                custom_fa=custom_fa, custom_ggbfs=custom_gg,
+                silica_mode=silica_mode, quartz_mode=quartz_mode,
+                min_silica=min_sf, min_quartz=min_qp,
+            )
+            rules.validate()
+            if training is not None:
+                support = count_training_matches(training, rules)
+                st.info(f"Dữ liệu huấn luyện có **{support} mẫu** khớp trạng thái vật liệu và ngưỡng tối thiểu đã chọn. Đây không phải đánh giá độ tin cậy của AI.")
+            with st.spinner("Đang dự đoán theo lô và tìm cấp phối phù hợp tổ hợp đã chọn..."):
+                result = optimize_mix(
+                    model, features, training_bounds, float(age), fixed, densities,
+                    rules, target, max_cement, mode=mode, training=training,
+                )
             st.session_state["inverse_result"] = result
+            st.session_state["inverse_choice_key"] = choice_key
         except Exception as exc:
             st.session_state.pop("inverse_result", None)
+            st.session_state.pop("inverse_choice_key", None)
             st.error(f"Không thực hiện được tối ưu: {exc}")
     result = st.session_state.get("inverse_result")
+    if result is not None and st.session_state.get("inverse_choice_key") != choice_key:
+        st.info("Bạn đã đổi tổ hợp vật liệu. Nhấn **Tìm cấp phối với mô hình AI** để tính lại; kết quả cũ đã được ẩn.")
+        result = None
     if result is not None:
+        st.markdown(f"**Tổ hợp đã tối ưu:** {result['binder_label']}")
+        if result["training_support_count"] is not None:
+            st.caption(f"Số mẫu huấn luyện khớp điều kiện vật liệu: {result['training_support_count']}. Số nghiệm hợp lệ từng gặp trong tìm kiếm: {result['feasible_candidates_seen']}.")
         if result["feasible"]:
             st.success("Đã tìm thấy **phương án thỏa các ràng buộc đang chọn theo mô hình AI**. Chưa phải cấp phối được thí nghiệm xác nhận.")
         else:
-            st.error("**Chưa tìm được cấp phối thỏa toàn bộ điều kiện** trong ngân sách tối ưu này. Bảng bên dưới chỉ là phương án ứng viên, **không được xem là cấp phối đạt yêu cầu**.")
+            st.error("**Chưa tìm được cấp phối thỏa toàn bộ điều kiện** trong ngân sách tối ưu này. Bảng bên dưới chỉ là ứng viên, **không được xem là cấp phối đạt yêu cầu**.")
         col1, col2, col3 = st.columns(3)
         col1.metric("Cường độ AI dự đoán", f"{result['prediction']:.2f} MPa")
         col2.metric("Cường độ yêu cầu", f"{result['target']:.1f} MPa")
@@ -223,7 +298,7 @@ with tab_inverse:
                      use_container_width=True, hide_index=True)
         for warning in result["warnings"]:
             st.warning(warning)
-        st.caption("Thuật toán chỉ kiểm tra điều kiện mô hình/giả định. Cần thử độ chảy, sự phân tán sợi, mẫu nén và độ bền lâu trước khi áp dụng thực tế.")
+        st.caption("Thuật toán chỉ kiểm tra điều kiện mô hình/giả định. Cần thử độ chảy, phân tán sợi, mẫu nén và độ bền lâu trước khi áp dụng thực tế.")
         chart = pd.DataFrame({"Vật liệu": [LABELS[k] for k in MATERIALS], "kg/m³": [result["mix"][k] for k in MATERIALS]})
         st.bar_chart(chart.set_index("Vật liệu"))
 
@@ -261,6 +336,7 @@ with tab_forward:
 
 with tab_method:
     st.subheader("Thông tin mô hình và giới hạn sử dụng")
+    st.write("**Tổ hợp chất liên kết:** 5 chế độ (hai vật liệu, chỉ FA, chỉ GGBFS, không FA/GGBFS, tùy chỉnh). Các lựa chọn không thuộc dữ liệu huấn luyện bị từ chối tối ưu. Silica fume được cấu hình riêng, bột thạch anh là chất độn.")
     st.write("**15 đặc trưng của notebook:**")
     st.code(", ".join(FEATURES_15), language="text")
     st.write("**Quan trọng:** `Ty_le_W_B = Nước / (Xi măng + FA + GGBFS + Silica fume + Bột thạch anh)` là định nghĩa *theo mô hình cũ*. Ứng dụng giữ nguyên để tương thích, đồng thời tính W/B quy ước riêng không chứa bột thạch anh.")
