@@ -14,7 +14,7 @@ import streamlit as st
 from uhpc_core import (
     BINDER_CHOICES, POLICY_CHOICES, DEFAULT_DENSITIES, DEFAULT_FIXED, FEATURES_15, LABELS, MATERIALS,
     NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings,
-    check_model_columns, count_training_matches, feature_frame, material_policies, optimize_mix, physical_quantities,
+    check_model_columns, count_training_matches, feature_frame, feature_importance_table, material_policies, optimize_mix, physical_quantities,
     predict, training_bounds_from_df,
 )
 
@@ -169,8 +169,9 @@ with st.sidebar:
     st.divider()
     st.caption("Dự đoán AI ≠ kết quả thí nghiệm. Chưa xác thực khả năng thi công, độ chảy, cường độ thực tế hay độ bền lâu.")
 
-tab_inverse, tab_forward, tab_method = st.tabs([
-    "🎯 Thiết kế cấp phối", "🧪 Dự đoán cường độ", "📘 Mô hình & phạm vi sử dụng",
+tab_inverse, tab_forward, tab_importance, tab_method = st.tabs([
+    "🎯 Thiết kế cấp phối", "🧪 Dự đoán cường độ",
+    "📊 Ảnh hưởng vật liệu", "📘 Mô hình & phạm vi sử dụng",
 ])
 
 with tab_inverse:
@@ -333,6 +334,88 @@ with tab_forward:
         for warning in warnings:
             st.warning(warning)
         display_mix(cmix, batch_mode, batch_amount, "du_doan")
+
+with tab_importance:
+    st.subheader("📊 Vật liệu nào quan trọng nhất trong dự đoán cường độ UHPC?")
+    st.caption(
+        "Biểu đồ lấy số liệu trực tiếp từ mô hình AI **đang được nạp trên website**; "
+        "không sử dụng các tỷ lệ giả định và không cần chạy Colab lại."
+    )
+    if model is None:
+        st.warning("Chưa có mô hình đã huấn luyện trong `assets/uhpc_model.pkl`; không thể vẽ biểu đồ thực.")
+    else:
+        try:
+            importance, importance_method = feature_importance_table(model, features)
+            if importance_method == "gain":
+                st.info(
+                    "**Phương pháp LightGBM Gain:** đo tổng mức cải thiện hàm mất mát "
+                    "tại những nút cây đã sử dụng đặc trưng. Điểm càng cao → mô hình "
+                    "đã dựa vào đặc trưng đó càng nhiều khi dự đoán. **Không chứng minh "
+                    "vật liệu đó gây tăng hay giảm cường độ.**"
+                )
+            else:
+                st.warning(
+                    f"Mô hình đang nạp là **{type(model).__name__}**, không phải LightGBM. "
+                    "Biểu đồ dùng impurity-based importance, KHÔNG phải gain của LightGBM. "
+                    "Để có biểu đồ Gain, hãy xuất lại mô hình LightGBM từ Colab."
+                )
+
+            materials_chart = importance[importance["Nhóm"] == "Vật liệu"].copy()
+            materials_chart = materials_chart.sort_values("Tỷ trọng trong 9 vật liệu (%)", ascending=False)
+            all_chart = importance.sort_values("Tỷ trọng toàn mô hình (%)", ascending=False)
+            if float(importance["Điểm gốc"].sum()) <= 0:
+                st.warning("Mô hình trả về điểm quan trọng bằng 0 cho mọi đặc trưng; không thể xếp hạng có ý nghĩa.")
+            elif float(materials_chart["Điểm gốc"].sum()) <= 0:
+                st.warning("9 vật liệu không có điểm importance dương. Mô hình đang dựa vào các đặc trưng khác; không thể kết luận thứ hạng vật liệu.")
+            else:
+                top = materials_chart.iloc[0]
+                st.metric("Vật liệu quan trọng nhất theo mô hình", top["Tên hiển thị"])
+                st.markdown("#### 1. Xếp hạng 9 vật liệu trong cấp phối")
+                st.bar_chart(
+                    materials_chart.set_index("Tên hiển thị")[["Tỷ trọng trong 9 vật liệu (%)"]],
+                    horizontal=True, height=370, x_label="% trong tổng điểm của 9 vật liệu",
+                    y_label="Vật liệu", use_container_width=True,
+                )
+                st.caption(
+                    "Các tỷ lệ của biểu đồ này được **chuẩn hóa trong 9 vật liệu**, tổng = 100%. "
+                    "Chúng không phải % tăng cường độ nén hoặc % thành phần cấp phối."
+                )
+            if float(importance["Điểm gốc"].sum()) > 0:
+                st.markdown("#### 2. Đóng góp của toàn bộ 15 đặc trưng")
+                st.bar_chart(
+                    all_chart.set_index("Tên hiển thị")[["Tỷ trọng toàn mô hình (%)"]],
+                    horizontal=True, height=500, x_label="% tổng điểm importance của 15 đặc trưng",
+                    y_label="Đặc trưng", use_container_width=True,
+                )
+                st.caption(
+                    "Biểu đồ gồm 9 vật liệu và 6 đặc trưng khác (tuổi, tỷ lệ nước/tổng bột, "
+                    "chất lượng nguyên liệu, hệ số mẫu). Đặc trưng có tương quan với nhau "
+                    "có thể chia sẻ tầm quan trọng, chẳng hạn Nước và tỷ lệ nước/tổng bột."
+                )
+            st.markdown("#### Bảng số liệu từ mô hình")
+            cols = ["Tên hiển thị", "Nhóm", "Tỷ trọng toàn mô hình (%)", "Tỷ trọng trong 9 vật liệu (%)", "Điểm gốc"]
+            st.dataframe(
+                importance[cols].style.format({
+                    "Tỷ trọng toàn mô hình (%)": "{:.2f}",
+                    "Tỷ trọng trong 9 vật liệu (%)": "{:.2f}",
+                    "Điểm gốc": "{:,.3f}",
+                }, na_rep="—"),
+                hide_index=True, use_container_width=True,
+            )
+            st.download_button(
+                "⬇️ Tải bảng ảnh hưởng vật liệu (CSV)",
+                data=importance.to_csv(index=False).encode("utf-8-sig"),
+                file_name="UHPC_LightGBM_feature_importance.csv" if importance_method == "gain" else "UHPC_feature_importance.csv",
+                mime="text/csv",
+            )
+            st.warning(
+                "**Giới hạn khoa học:** Feature Importance không chỉ ra dấu tác động (+/−), "
+                "không có nghĩa tăng vật liệu này sẽ làm cường độ tăng. Đây là mức quan trọng "
+                "đối với dự đoán của mô hình trong dữ liệu huấn luyện; không phải kết quả thí nghiệm độc lập."
+            )
+        except Exception as exc:
+            st.error(f"Không tính được biểu đồ tầm quan trọng từ mô hình: {exc}")
+
 
 with tab_method:
     st.subheader("Thông tin mô hình và giới hạn sử dụng")

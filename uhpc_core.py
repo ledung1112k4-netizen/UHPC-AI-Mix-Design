@@ -27,6 +27,69 @@ LABELS = {
     "Nuoc": "Nước", "Phu_gia_sieu_deo": "Phụ gia siêu dẻo",
     "Soi_thep": "Sợi thép",
 }
+
+
+# Nhãn 15 đặc trưng, dùng để giải thích mô hình đã huấn luyện.
+FEATURE_LABELS = {
+    **LABELS,
+    "Tuoi_duong_ho": "Tuổi dưỡng hộ (ngày)",
+    "Ty_le_W_B": "Tỷ lệ nước/tổng bột (theo mô hình)",
+    "FlyAsh_SiO2": "SiO₂ tro bay (%)",
+    "FlyAsh_Blaine": "Blaine tro bay",
+    "GGBFS_Grade": "Mác GGBFS",
+    "He_so_quy_doi_mau": "Hệ số quy đổi mẫu",
+}
+
+
+def feature_importance_table(model: Any, feature_cols: list[str]) -> tuple[pd.DataFrame, str]:
+    """Đọc tầm quan trọng từ CHÍNH mô hình đã tải, không sinh dữ liệu giả.
+
+    LightGBM: gain = tổng cải thiện tiêu chí chia tách của các cây.
+    Random/Extra Trees: impurity-based importance; không đồng nhất thước đo gain.
+    Không có bộ nhãn y kiểm chứng nên KHÔNG tính permutation importance/SHAP giả.
+    """
+    check_model_columns(model, feature_cols)
+    booster = None
+    try:
+        booster = model.booster_
+    except (AttributeError, ValueError, TypeError):
+        pass
+
+    if booster is not None and callable(getattr(booster, "feature_importance", None)):
+        metric = "gain"
+        raw = np.asarray(booster.feature_importance(importance_type="gain"), dtype=float)
+        model_names = list(booster.feature_name())
+        if model_names != list(feature_cols):
+            raise ValueError("Tên/thứ tự đặc trưng của booster không khớp tệp mô hình; không thể gán điểm đúng vật liệu.")
+    elif type(model).__module__.split(".")[0] == "lightgbm":
+        raise ValueError("Không đọc được gain từ LightGBM đã huấn luyện. Vui lòng kiểm tra tệp mô hình.")
+    elif hasattr(model, "feature_importances_"):
+        metric = "impurity"
+        raw = np.asarray(model.feature_importances_, dtype=float)
+    else:
+        raise ValueError("Mô hình hiện tại không hỗ trợ lấy feature importance theo cây. Không có biểu đồ được tạo.")
+
+    if raw.ndim != 1 or len(raw) != len(feature_cols):
+        raise ValueError("Số điểm quan trọng không khớp 15 đặc trưng của mô hình.")
+    if not np.isfinite(raw).all() or (raw < 0).any():
+        raise ValueError("Điểm quan trọng của mô hình có giá trị không hợp lệ.")
+
+    total = float(raw.sum())
+    frame = pd.DataFrame({
+        "Đặc trưng": feature_cols,
+        "Tên hiển thị": [FEATURE_LABELS[x] for x in feature_cols],
+        "Nhóm": ["Vật liệu" if x in MATERIALS else "Biến khác" for x in feature_cols],
+        "Điểm gốc": raw,
+        "Tỷ trọng toàn mô hình (%)": raw / total * 100.0 if total else np.zeros(len(raw)),
+    })
+    material_total = float(frame.loc[frame["Nhóm"] == "Vật liệu", "Điểm gốc"].sum())
+    frame["Tỷ trọng trong 9 vật liệu (%)"] = np.where(
+        frame["Nhóm"].eq("Vật liệu"),
+        raw / material_total * 100.0 if material_total else np.zeros(len(raw)),
+        np.nan,
+    )
+    return frame.sort_values("Điểm gốc", ascending=False, kind="stable").reset_index(drop=True), metric
+
 # Các giá trị dưới đây là giá trị minh họa để bắt đầu nhập, KHÔNG là cấp phối đã được chứng thực.
 # Chúng được chép từ 'test_mix' trong cell 23 của notebook do người dùng cung cấp.
 NOTEBOOK_TEST_MIX = {
