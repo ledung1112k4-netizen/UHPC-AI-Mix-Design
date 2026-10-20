@@ -15,7 +15,7 @@ from uhpc_core import (
     BINDER_CHOICES, POLICY_CHOICES, DEFAULT_DENSITIES, DEFAULT_FIXED, FEATURES_15, LABELS, MATERIALS,
     NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings, mass_percentages,
     check_model_columns, count_training_matches, feature_frame, feature_importance_table, material_policies, optimize_mix, physical_quantities,
-    predict, training_bounds_from_df,
+    predict, training_bounds_from_df, steel_limit_kg_m3, steel_volume_percent,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -107,11 +107,12 @@ def display_mix(mix: dict[str, float], mode: str, amount: float, suffix: str) ->
 
 def show_ratios(mix: dict[str, float], densities: dict[str, float], age: float, model_ratio: float | None = None):
     physical = physical_quantities(pd.DataFrame([mix]), densities).iloc[0]
-    cs = st.columns(4)
+    cs = st.columns(5)
     cs[0].metric("W/B (không tính bột thạch anh)", f"{physical['W_B']:.3f}")
     cs[1].metric("W/Tổng bột (theo AI)", f"{physical['W_powder']:.3f}")
     cs[2].metric("Σ thể tích tuyệt đối", f"{physical['absolute_volume']:.3f} m³")
-    cs[3].metric("Tuổi dự đoán", f"{age:g} ngày")
+    cs[3].metric("Sợi thép (% thể tích)", f"{steel_volume_percent(mix['Soi_thep'], densities['Soi_thep']):.2f}%")
+    cs[4].metric("Tuổi dự đoán", f"{age:g} ngày")
     st.caption("W/Tổng bột là đặc trưng `Ty_le_W_B` có trong mô hình notebook; W/B thông thường KHÔNG tính bột thạch anh. Khối lượng riêng đang dùng là giá trị tham khảo và phải hiệu chỉnh theo vật liệu thực tế.")
     return physical
 
@@ -232,7 +233,10 @@ with tab_inverse:
         )
         st.caption("Bột thạch anh là chất độn, không được tính là chất liên kết trong W/B quy ước. Chọn 'Không sử dụng' sẽ cố định lượng vật liệu bằng 0 kg/m³.")
 
-    choice_key = (binder_mode, custom_fa, custom_gg, silica_mode, quartz_mode)
+    # Ẩn kết quả cũ nếu cài đặt thuộc tính vật liệu đã thay đổi.
+    choice_key = (binder_mode, custom_fa, custom_gg, silica_mode, quartz_mode,
+                  tuple((k, float(densities[k])) for k in MATERIALS),
+                  tuple((k, float(fixed[k])) for k in DEFAULT_FIXED))
     if binder_mode == "BOTH":
         fa_policy, gg_policy = "required", "required"
     elif binder_mode == "FA_ONLY":
@@ -264,6 +268,27 @@ with tab_inverse:
             c2, d2 = st.columns(2)
             air_percent = c2.number_input("Khí giả định (%)", min_value=0.0, max_value=15.0, value=2.0, step=0.5)
             vol_tol = d2.number_input("Sai số thể tích (m³)", min_value=0.005, max_value=0.1, value=0.02, step=0.005, format="%.3f")
+        st.markdown("#### 🧵 Giới hạn và ưu tiên giảm sợi thép")
+        f_left, f_right = st.columns([1, 2])
+        max_steel_pct = f_left.slider(
+            "Sợi thép tối đa (% thể tích)", min_value=0.0, max_value=3.0,
+            value=2.0, step=0.25,
+            help="0% = không dùng sợi; 2% thể tích với ρ = 7.850 kg/m³ tương ứng 157 kg/m³.",
+        )
+        priority_label = f_right.radio(
+            "Mức ưu tiên tiết kiệm sợi thép",
+            ["Cân bằng", "Ưu tiên mạnh", "Không ưu tiên"],
+            horizontal=True,
+            help="Điểm tối ưu = kg xi măng/m³ + trọng số × kg sợi/m³. "
+                 "Trọng số kỹ thuật, không phải đơn giá hay bằng chứng nhân quả.",
+        )
+        steel_weight = {"Không ưu tiên": 0.0, "Cân bằng": 1.0, "Ưu tiên mạnh": 3.0}[priority_label]
+        st.caption(
+            f"Giới hạn cứng: {max_steel_pct:.2f}% thể tích = "
+            f"{max_steel_pct / 100.0 * densities['Soi_thep']:.2f} kg sợi/m³ "
+            f"(ρ sợi = {densities['Soi_thep']:,.0f} kg/m³). "
+            "Không tự nới giới hạn nếu AI chưa tìm được cấp phối hợp lệ."
+        )
         run_opt = st.form_submit_button("🔎 Tìm cấp phối với mô hình AI", type="primary", disabled=(model is None or training_bounds is None), use_container_width=True)
     st.caption(
         "Giới hạn vật liệu, W/B và thể tích là điều kiện sàng lọc người dùng lựa chọn; "
@@ -278,10 +303,11 @@ with tab_inverse:
                 custom_fa=custom_fa, custom_ggbfs=custom_gg,
                 silica_mode=silica_mode, quartz_mode=quartz_mode,
                 min_silica=min_sf, min_quartz=min_qp,
+                max_steel_vol_percent=max_steel_pct, steel_saving_weight=steel_weight,
             )
             rules.validate()
             if training is not None:
-                support = count_training_matches(training, rules)
+                support = count_training_matches(training, rules, densities["Soi_thep"])
                 st.info(f"Dữ liệu huấn luyện có **{support} mẫu** khớp trạng thái vật liệu và ngưỡng tối thiểu đã chọn. Đây không phải đánh giá độ tin cậy của AI.")
             with st.spinner("Đang dự đoán theo lô và tìm cấp phối phù hợp tổ hợp đã chọn..."):
                 result = optimize_mix(
@@ -311,6 +337,13 @@ with tab_inverse:
         col2.metric("Cường độ yêu cầu", f"{result['target']:.1f} MPa")
         col3.metric("Số phép dự đoán", f"{result['evaluations']:,}")
         show_ratios(result["mix"], densities, result["age"])
+        st.caption(
+            f"Sợi thép đề xuất: {result['mix']['Soi_thep']:.2f} kg/m³ "
+            f"({result['steel_volume_percent']:.2f}% thể tích); "
+            f"giới hạn tối đa: {result['steel_limit_kg_m3']:.2f} kg/m³ "
+            f"({result['steel_limit_vol_percent']:.2f}% thể tích). "
+            f"Trọng số ưu tiên giảm sợi: {result['steel_saving_weight']:g}."
+        )
         st.markdown("#### Bảng cấp phối đề xuất / ứng viên")
         display_mix(result["mix"], batch_mode, batch_amount, "de_xuat")
         st.markdown("#### Kiểm tra điều kiện đầu ra")
@@ -440,6 +473,7 @@ with tab_importance:
 with tab_method:
     st.subheader("Thông tin mô hình và giới hạn sử dụng")
     st.write("**Tổ hợp chất liên kết:** 5 chế độ (hai vật liệu, chỉ FA, chỉ GGBFS, không FA/GGBFS, tùy chỉnh). Các lựa chọn không thuộc dữ liệu huấn luyện bị từ chối tối ưu. Silica fume được cấu hình riêng, bột thạch anh là chất độn.")
+    st.write("**Giới hạn sợi thép v5:** sợi thép là biến độc lập trong mô hình nhưng bị chặn cứng theo % thể tích ở bài toán tối ưu ngược. Mặc định 2% thể tích = 157 kg/m³ nếu khối lượng riêng sợi = 7.850 kg/m³. Không đồng nghĩa đây là mức tiêu chuẩn cho mọi UHPC. Hàm mục tiêu ưu tiên giảm cả lượng xi măng và lượng sợi với trọng số kỹ thuật (không phải giá thị trường); cấp phối chỉ được chấp nhận sau khi thỏa giới hạn cứng, điều kiện W/B, thể tích và cường độ dự đoán. Bài toán dự đoán thuận cho phép nhập tự do nhưng hiển thị % sợi để người dùng tự kiểm tra.")
     st.write("**15 đặc trưng của notebook:**")
     st.code(", ".join(FEATURES_15), language="text")
     st.write("**Quan trọng:** `Ty_le_W_B = Nước / (Xi măng + FA + GGBFS + Silica fume + Bột thạch anh)` là định nghĩa *theo mô hình cũ*. Ứng dụng giữ nguyên để tương thích, đồng thời tính W/B quy ước riêng không chứa bột thạch anh.")

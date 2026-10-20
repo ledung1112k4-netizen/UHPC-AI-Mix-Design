@@ -141,6 +141,11 @@ class DesignRules:
     quartz_mode: str = "optional"
     min_silica: float = 20.0
     min_quartz: float = 20.0
+    # % THỂ TÍCH trên 1 m³ bê tông, KHÔNG phải % khối lượng.
+    max_steel_vol_percent: float = 2.0
+    # Trọng số kỹ thuật: 0 = chỉ giảm xi măng; >0 = ưu tiên giảm cả sợi.
+    # Không đại diện chi phí thị trường, không dùng thay kết quả thí nghiệm.
+    steel_saving_weight: float = 1.0
 
     def validate(self) -> None:
         if not (0 < self.wb_min <= self.wb_max < 1):
@@ -161,6 +166,10 @@ class DesignRules:
         for k, policy in material_policies(self).items():
             if policy == "required" and material_minimum(self, k) <= 0:
                 raise ValueError(f"{LABELS[k]} bắt buộc phải có lượng tối thiểu > 0.")
+        if not np.isfinite(self.max_steel_vol_percent) or not 0 <= self.max_steel_vol_percent <= 5:
+            raise ValueError("Giới hạn sợi thép phải nằm trong khoảng 0–5% thể tích.")
+        if not np.isfinite(self.steel_saving_weight) or not 0 <= self.steel_saving_weight <= 10:
+            raise ValueError("Trọng số ưu tiên giảm sợi thép phải thuộc 0–10.")
         if not np.isfinite(self.margin_mpa) or self.margin_mpa < 0:
             raise ValueError("Biên dự phòng cường độ không được âm.")
 
@@ -188,14 +197,15 @@ def material_minimum(rules: DesignRules, key: str) -> float:
     }[key]
 
 
-def count_training_matches(training: pd.DataFrame, rules: DesignRules) -> int:
+def count_training_matches(training: pd.DataFrame, rules: DesignRules, steel_density: float = 7850.0) -> int:
     """Số dòng huấn luyện có trạng thái vật liệu tương ứng, không là đánh giá độ tin cậy.
 
     Sự xuất hiện một mẫu cùng tổ hợp KHÔNG đảm bảo cấp phối mới nằm trong phân bố train.
     """
     rules.validate()
+    max_steel = steel_limit_kg_m3(rules, steel_density)
     policies = material_policies(rules)
-    missing = set(policies) - set(training.columns)
+    missing = (set(policies) | {"Soi_thep"}) - set(training.columns)
     if missing:
         raise ValueError("Dữ liệu huấn luyện thiếu: " + ", ".join(sorted(missing)))
     mask = np.ones(len(training), dtype=bool)
@@ -206,17 +216,36 @@ def count_training_matches(training: pd.DataFrame, rules: DesignRules) -> int:
             mask &= np.abs(values) <= 1e-8
         elif policy == "required":
             mask &= values >= material_minimum(rules, k) - 1e-8
+    steel = pd.to_numeric(training["Soi_thep"], errors="coerce").to_numpy(dtype=float)
+    mask &= np.isfinite(steel) & (steel >= -1e-8) & (steel <= max_steel + 1e-8)
     return int(np.sum(mask))
+
+
+def steel_limit_kg_m3(rules: DesignRules, steel_density: float) -> float:
+    """m_sợi (kg/m³ bê tông) = thể tích sợi (%) /100 * ρ_sợi (kg/m³ sợi)."""
+    if not np.isfinite(steel_density) or steel_density <= 0:
+        raise ValueError("Khối lượng riêng sợi thép phải dương và hữu hạn.")
+    return float(rules.max_steel_vol_percent / 100.0 * steel_density)
+
+
+def steel_volume_percent(mass_kg_m3: float, steel_density: float) -> float:
+    if not np.isfinite(mass_kg_m3) or mass_kg_m3 < 0:
+        raise ValueError("Khối lượng sợi thép phải không âm, hữu hạn.")
+    if not np.isfinite(steel_density) or steel_density <= 0:
+        raise ValueError("Khối lượng riêng sợi thép phải dương và hữu hạn.")
+    return float(100.0 * mass_kg_m3 / steel_density)
 
 
 def material_search_bounds(
     training_bounds: dict[str, tuple[float, float]],
     rules: DesignRules,
     max_cement: float,
+    steel_density: float = 7850.0,
 ) -> list[tuple[float, float]]:
     """Áp ràng buộc từng vật liệu trực tiếp vào vector tối ưu DE."""
     rules.validate()
     policies = material_policies(rules)
+    steel_cap = steel_limit_kg_m3(rules, steel_density)
     bds = []
     for k in MATERIALS:
         lo, hi = training_bounds[k]
@@ -227,6 +256,8 @@ def material_search_bounds(
         if k == "Xi_mang":
             lo = max(lo, 1.0)  # vẫn là UHPC xi măng; không tối ưu nghiệm không xi măng
             hi = min(hi, max_cement)
+        if k == "Soi_thep":
+            hi = min(hi, steel_cap)  # HARD CAP: không thể vượt kể cả khi model thích nhiều sợi
         if k in policies:
             if policies[k] == "off":
                 if training_bounds[k][0] > 1e-8 or training_bounds[k][1] < -1e-8:
@@ -415,7 +446,7 @@ def optimize_mix(
     # Nếu không có dữ liệu train, không được giả định tổ hợp chưa thấy là đã được học.
     support_count = None
     if training is not None:
-        support_count = count_training_matches(training, rules)
+        support_count = count_training_matches(training, rules, densities["Soi_thep"])
         if support_count == 0:
             raise ValueError(
                 "Không có mẫu huấn luyện nào khớp tổ hợp chất liên kết và ngưỡng tối thiểu "
@@ -428,7 +459,8 @@ def optimize_mix(
             "đã chọn. Hiện chỉ giữ chế độ mặc định khi chưa có tệp này."
         )
 
-    bds = material_search_bounds(training_bounds, rules, max_cement)
+    fiber_cap_kg = steel_limit_kg_m3(rules, densities["Soi_thep"])
+    bds = material_search_bounds(training_bounds, rules, max_cement, densities["Soi_thep"])
     maxiter, popsize = (25, 7) if mode == "Nhanh" else (90, 12)
     dens_arr = np.array([densities[k] for k in MATERIALS], dtype=float)
     if not np.isfinite(dens_arr).all() or np.any(dens_arr <= 0):
@@ -437,7 +469,7 @@ def optimize_mix(
     index = {k: i for i, k in enumerate(MATERIALS)}
     policies = material_policies(rules)
     total_call = [0]
-    best_feasible = {"cement": float("inf"), "x": None, "count": 0}
+    best_feasible = {"score": float("inf"), "x": None, "count": 0}
     training_keys = list(training_bounds)
 
     def outside(y: np.ndarray, low: float, high: float) -> np.ndarray:
@@ -457,8 +489,11 @@ def optimize_mix(
         vol = quantities["absolute_volume"].to_numpy()
         model_r = quantities["W_powder"].to_numpy()
         lo_wb, hi_wb = training_bounds["Ty_le_W_B"]
+        steel_mass = mix_arr[:, index["Soi_thep"]]
+        # Điểm mục tiêu chỉ dùng trong tối ưu, KHÔNG biểu diễn giá tiền hay cường độ.
+        weighted_material_score = mix_arr[:, index["Xi_mang"]] + rules.steel_saving_weight * steel_mass
         loss = (
-            mix_arr[:, index["Xi_mang"]]
+            weighted_material_score
             + 1.0e4 * shortage ** 2
             + 1.0e6 * outside(wb, rules.wb_min, rules.wb_max) ** 2
             + 1.0e6 * outside(
@@ -466,6 +501,7 @@ def optimize_mix(
                 target_volume + rules.volume_tolerance
             ) ** 2
             + 1.0e6 * outside(model_r, lo_wb, hi_wb) ** 2
+            + 1.0e6 * np.maximum(steel_mass - fiber_cap_kg, 0.0) ** 2
         )
         in_bounds = np.ones(len(df), dtype=bool)
         for k in training_keys:
@@ -476,16 +512,17 @@ def optimize_mix(
             (shortage <= 1e-7)
             & (outside(wb, rules.wb_min, rules.wb_max) <= 1e-7)
             & (abs(vol - target_volume) <= rules.volume_tolerance + 1e-7)
+            & (steel_mass <= fiber_cap_kg + 1e-7)
             & in_bounds
         )
         total_call[0] += len(df)
         best_feasible["count"] += int(feasible.sum())
         if feasible.any():
             choices = np.flatnonzero(feasible)
-            lowest = choices[np.argmin(mix_arr[choices, index["Xi_mang"]])]
-            cement = mix_arr[lowest, index["Xi_mang"]]
-            if cement < best_feasible["cement"]:
-                best_feasible["cement"] = float(cement)
+            lowest = choices[np.argmin(weighted_material_score[choices])]
+            score = weighted_material_score[lowest]
+            if score < best_feasible["score"]:
+                best_feasible["score"] = float(score)
                 best_feasible["x"] = mix_arr[lowest].copy()
         return loss
 
@@ -507,6 +544,9 @@ def optimize_mix(
         "W/B trong giới hạn": rules.wb_min - 1e-7 <= measures["W_B"] <= rules.wb_max + 1e-7,
         "Thể tích tuyệt đối hợp lệ": abs(measures["absolute_volume"] - target_volume) <= rules.volume_tolerance + 1e-7,
         "Không vượt miền từng đặc trưng": not extra,
+        f"Sợi thép ≤ {rules.max_steel_vol_percent:g}% thể tích ({fiber_cap_kg:.2f} kg/m³)": (
+            proposal["Soi_thep"] <= fiber_cap_kg + 1e-7
+        ),
     }
     for k, policy in policies.items():
         if policy == "off":
@@ -544,4 +584,9 @@ def optimize_mix(
         "training_support_count": support_count,
         "feasible_candidates_seen": best_feasible["count"],
         "selected_from_feasible_candidates": selected_feasible,
+        "steel_limit_kg_m3": fiber_cap_kg,
+        "steel_limit_vol_percent": rules.max_steel_vol_percent,
+        "steel_volume_percent": steel_volume_percent(proposal["Soi_thep"], densities["Soi_thep"]),
+        "steel_saving_weight": rules.steel_saving_weight,
+        "weighted_material_score": proposal["Xi_mang"] + rules.steel_saving_weight * proposal["Soi_thep"],
     }
