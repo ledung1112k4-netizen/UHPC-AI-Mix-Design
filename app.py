@@ -16,6 +16,7 @@ from uhpc_core import (
     NOTEBOOK_TEST_MIX, DesignRules, batch_table, bound_warnings, mass_percentages,
     check_model_columns, count_training_matches, feature_frame, feature_importance_table, material_policies, optimize_mix, physical_quantities,
     predict, training_bounds_from_df, steel_limit_kg_m3, steel_volume_percent,
+    training_similarity, training_data_audit,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -164,6 +165,39 @@ else:
     if training_error:
         st.error("Không đọc được phạm vi dữ liệu huấn luyện: " + training_error)
 
+def show_data_similarity(info: dict | None) -> None:
+    if not info:
+        st.info("Chưa có dữ liệu đầy đủ để kiểm tra vùng lân cận của cấp phối.")
+        return
+    st.markdown("#### Khoảng cách đến dữ liệu huấn luyện")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Khoảng cách lân cận (chuẩn hóa)", f"{info['distance_k']:.3f}")
+    c2.metric("Mốc P95 dữ liệu train", f"{info['reference_p95']:.3f}")
+    c3.metric("Số mẫu train duy nhất", f"{info['unique_training_mixes']:,}")
+    if info["outside_typical_region"]:
+        st.warning("⚠️ Cấp phối nằm xa hơn vùng lân cận của phần lớn dữ liệu huấn luyện. "
+                   "Kết quả AI có nguy cơ ngoại suy; không coi là cấp phối đã xác nhận.")
+    else:
+        st.info("Cấp phối tương đối gần các mẫu train theo chỉ số đã chọn. "
+                "**Điều này không bảo đảm cường độ nén hoặc độ chính xác dự đoán.**")
+    st.caption("Thước đo Euclid sau chuẩn hóa min-max các đặc trưng biến thiên, "
+               f"dùng láng giềng thứ {info['k']}; mốc 95% được tính trên train. "
+               "Không phải độ tin cậy 95%, không đánh giá độ chảy hoặc độ bền thực tế.")
+
+
+def show_calibration(bundle: dict, prediction: float) -> None:
+    validation = bundle.get("validation", {}) if isinstance(bundle, dict) else {}
+    q90 = validation.get("calibration_q90_abs_error_mpa")
+    if q90 is not None and isinstance(q90, (int, float)) and 0 <= float(q90) < 1000:
+        low, high = max(0.0, prediction - float(q90)), prediction + float(q90)
+        st.info(f"Khoảng dự đoán tham khảo từ tập calibration độc lập (~90%, theo giả định): "
+                f"**{low:.2f} – {high:.2f} MPa**. Chỉ áp dụng có điều kiện khi dữ liệu mới "
+                "cùng phân bố, không bảo đảm bao phủ trường hợp ngoại suy.")
+    else:
+        st.caption("Mô hình hiện chưa có kết quả hiệu chuẩn sai số từ tập calibration độc lập. "
+                   "Không thể hiển thị khoảng dự đoán có căn cứ.")
+
+
 with st.sidebar:
     st.header("⚙️ Cài đặt chung")
     batch_kind = st.radio("Cách tính mẻ trộn", ["Khối lượng (kg)", "Thể tích (m³)"], horizontal=False)
@@ -190,9 +224,9 @@ with st.sidebar:
     st.divider()
     st.caption("Dự đoán AI ≠ kết quả thí nghiệm. Chưa xác thực khả năng thi công, độ chảy, cường độ thực tế hay độ bền lâu.")
 
-tab_inverse, tab_forward, tab_importance, tab_method = st.tabs([
+tab_inverse, tab_forward, tab_importance, tab_dataset, tab_method = st.tabs([
     "🎯 Thiết kế cấp phối", "🧪 Dự đoán cường độ",
-    "📊 Ảnh hưởng vật liệu", "📘 Mô hình & phạm vi sử dụng",
+    "📊 Ảnh hưởng vật liệu", "🔍 Kiểm tra dữ liệu", "📘 Mô hình & phạm vi sử dụng",
 ])
 
 with tab_inverse:
@@ -308,7 +342,7 @@ with tab_inverse:
             rules.validate()
             if training is not None:
                 support = count_training_matches(training, rules, densities["Soi_thep"])
-                st.info(f"Dữ liệu huấn luyện có **{support} mẫu** khớp trạng thái vật liệu và ngưỡng tối thiểu đã chọn. Đây không phải đánh giá độ tin cậy của AI.")
+                st.info(f"Dữ liệu huấn luyện có **{support} tổ hợp đặc trưng khác nhau** khớp trạng thái vật liệu và ngưỡng tối thiểu. Không phải số thí nghiệm độc lập hoặc đánh giá độ tin cậy.")
             with st.spinner("Đang dự đoán theo lô và tìm cấp phối phù hợp tổ hợp đã chọn..."):
                 result = optimize_mix(
                     model, features, training_bounds, float(age), fixed, densities,
@@ -327,15 +361,31 @@ with tab_inverse:
     if result is not None:
         st.markdown(f"**Tổ hợp đã tối ưu:** {result['binder_label']}")
         if result["training_support_count"] is not None:
-            st.caption(f"Số mẫu huấn luyện khớp điều kiện vật liệu: {result['training_support_count']}. Số nghiệm hợp lệ từng gặp trong tìm kiếm: {result['feasible_candidates_seen']}.")
+            st.caption(f"Số tổ hợp đặc trưng train khác nhau khớp điều kiện: {result['training_support_count']}. Số nghiệm hợp lệ từng gặp trong tìm kiếm: {result['feasible_candidates_seen']}.")
         if result["feasible"]:
-            st.success("Đã tìm thấy **phương án thỏa các ràng buộc đang chọn theo mô hình AI**. Chưa phải cấp phối được thí nghiệm xác nhận.")
+            validation = bundle.get("validation", {})
+            q90 = validation.get("calibration_q90_abs_error_mpa") if isinstance(validation, dict) else None
+            uncertain_target = (
+                isinstance(q90, (int, float)) and 0 <= float(q90) < 1000
+                and result["prediction"] - float(q90) < result["target"]
+            )
+            if result.get("training_similarity") and result["training_similarity"]["outside_typical_region"]:
+                st.warning("Ứng viên thỏa các ràng buộc số học nhưng **xa dữ liệu huấn luyện**; "
+                           "không nên sử dụng như cấp phối đã được kiểm chứng.")
+            elif uncertain_target:
+                st.warning("Ứng viên thỏa ràng buộc dự đoán điểm nhưng **cận dưới của khoảng "
+                           "dự đoán tham khảo thấp hơn mục tiêu**. Chưa có đủ căn cứ để tin "
+                           "cường độ thực tế sẽ đạt yêu cầu.")
+            else:
+                st.success("Đã tìm thấy **phương án thỏa các ràng buộc đang chọn theo mô hình AI**. Chưa phải cấp phối được thí nghiệm xác nhận.")
         else:
             st.error("**Chưa tìm được cấp phối thỏa toàn bộ điều kiện** trong ngân sách tối ưu này. Bảng bên dưới chỉ là ứng viên, **không được xem là cấp phối đạt yêu cầu**.")
         col1, col2, col3 = st.columns(3)
         col1.metric("Cường độ AI dự đoán", f"{result['prediction']:.2f} MPa")
         col2.metric("Cường độ yêu cầu", f"{result['target']:.1f} MPa")
         col3.metric("Số phép dự đoán", f"{result['evaluations']:,}")
+        show_calibration(bundle, result["prediction"])
+        show_data_similarity(result.get("training_similarity"))
         show_ratios(result["mix"], densities, result["age"])
         st.caption(
             f"Sợi thép đề xuất: {result['mix']['Soi_thep']:.2f} kg/m³ "
@@ -381,6 +431,12 @@ with tab_forward:
     if "forward_result" in st.session_state:
         cmix, cage, yhat, warnings = st.session_state["forward_result"]
         st.metric("Cường độ nén AI dự đoán", f"{yhat:.2f} MPa", help="Không phải số đo thí nghiệm.")
+        show_calibration(bundle, yhat)
+        if training is not None:
+            try:
+                show_data_similarity(training_similarity(cmix, cage, fixed, features, training))
+            except ValueError as exc:
+                st.warning(f"Không thể đánh giá độ gần dữ liệu: {exc}")
         show_ratios(cmix, densities, cage)
         if not training_bounds:
             st.warning("Không có dải huấn luyện để kiểm tra ngoại suy cho cấp phối này.")
@@ -470,10 +526,35 @@ with tab_importance:
             st.error(f"Không tính được biểu đồ tầm quan trọng từ mô hình: {exc}")
 
 
+with tab_dataset:
+    st.subheader("Kiểm tra chất lượng dữ liệu được đóng gói cùng mô hình")
+    st.caption("Tệp assets/training_features.csv chỉ gồm X_train; không có cường độ đo, "
+               "nguồn bài báo hay dữ liệu test độc lập. Không thể suy ra R², MAE, RMSE từ tệp này.")
+    if training is None:
+        st.warning("Không tìm thấy tệp dữ liệu huấn luyện; không thể kiểm tra.")
+    else:
+        try:
+            report = training_data_audit(training, features)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Dòng train", f"{report['total_rows']:,}")
+            c2.metric("Dòng đặc trưng trùng", f"{report['exact_duplicate_features']:,}")
+            c3.metric("Có FA & GGBFS, 28 ngày", f"{report['with_fa_and_ggbfs_28d']:,}")
+            st.write("**Đặc trưng không biến thiên:** " +
+                     (", ".join(report['constant_features']) if report['constant_features'] else "Không có"))
+            st.warning("Các bản ghi giống X chưa chắc là dữ liệu đo trùng: có thể có mẫu lặp "
+                       "khác cường độ. Chỉ loại trùng sau khi kiểm tra y và nguồn bài báo. "
+                       "Các đặc trưng hằng không thể dùng để kết luận vai trò hóa lý của vật liệu.")
+            st.markdown("**Việc cần chạy trong Google Colab:** đánh giá dữ liệu có nhãn y, "
+                        "chia train/calibration/test theo nhóm, xuất R²/MAE/RMSE độc lập "
+                        "và mô hình LightGBM mới khi đã kiểm chứng.")
+        except Exception as exc:
+            st.error(f"Không kiểm tra được dữ liệu: {exc}")
+
+
 with tab_method:
     st.subheader("Thông tin mô hình và giới hạn sử dụng")
     st.write("**Tổ hợp chất liên kết:** 5 chế độ (hai vật liệu, chỉ FA, chỉ GGBFS, không FA/GGBFS, tùy chỉnh). Các lựa chọn không thuộc dữ liệu huấn luyện bị từ chối tối ưu. Silica fume được cấu hình riêng, bột thạch anh là chất độn.")
-    st.write("**Giới hạn sợi thép v5:** sợi thép là biến độc lập trong mô hình nhưng bị chặn cứng theo % thể tích ở bài toán tối ưu ngược. Mặc định 2% thể tích = 157 kg/m³ nếu khối lượng riêng sợi = 7.850 kg/m³. Không đồng nghĩa đây là mức tiêu chuẩn cho mọi UHPC. Hàm mục tiêu ưu tiên giảm cả lượng xi măng và lượng sợi với trọng số kỹ thuật (không phải giá thị trường); cấp phối chỉ được chấp nhận sau khi thỏa giới hạn cứng, điều kiện W/B, thể tích và cường độ dự đoán. Bài toán dự đoán thuận cho phép nhập tự do nhưng hiển thị % sợi để người dùng tự kiểm tra.")
+    st.write("**Giới hạn sợi thép v6:** sợi thép là biến độc lập trong mô hình nhưng bị chặn cứng theo % thể tích ở bài toán tối ưu ngược. Mặc định 2% thể tích = 157 kg/m³ nếu khối lượng riêng sợi = 7.850 kg/m³. Không đồng nghĩa đây là mức tiêu chuẩn cho mọi UHPC. Hàm mục tiêu ưu tiên giảm cả lượng xi măng và lượng sợi với trọng số kỹ thuật (không phải giá thị trường); cấp phối chỉ được chấp nhận sau khi thỏa giới hạn cứng, điều kiện W/B, thể tích và cường độ dự đoán. Bài toán dự đoán thuận cho phép nhập tự do nhưng hiển thị % sợi để người dùng tự kiểm tra.")
     st.write("**15 đặc trưng của notebook:**")
     st.code(", ".join(FEATURES_15), language="text")
     st.write("**Quan trọng:** `Ty_le_W_B = Nước / (Xi măng + FA + GGBFS + Silica fume + Bột thạch anh)` là định nghĩa *theo mô hình cũ*. Ứng dụng giữ nguyên để tương thích, đồng thời tính W/B quy ước riêng không chứa bột thạch anh.")

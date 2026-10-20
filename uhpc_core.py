@@ -198,7 +198,7 @@ def material_minimum(rules: DesignRules, key: str) -> float:
 
 
 def count_training_matches(training: pd.DataFrame, rules: DesignRules, steel_density: float = 7850.0) -> int:
-    """Số dòng huấn luyện có trạng thái vật liệu tương ứng, không là đánh giá độ tin cậy.
+    """Số tổ hợp đặc trưng train DUY NHẤT có trạng thái vật liệu tương ứng.
 
     Sự xuất hiện một mẫu cùng tổ hợp KHÔNG đảm bảo cấp phối mới nằm trong phân bố train.
     """
@@ -218,7 +218,8 @@ def count_training_matches(training: pd.DataFrame, rules: DesignRules, steel_den
             mask &= values >= material_minimum(rules, k) - 1e-8
     steel = pd.to_numeric(training["Soi_thep"], errors="coerce").to_numpy(dtype=float)
     mask &= np.isfinite(steel) & (steel >= -1e-8) & (steel <= max_steel + 1e-8)
-    return int(np.sum(mask))
+    # Chỉ đếm tổ hợp đặc trưng khác nhau; bản ghi lặp không tăng độ bao phủ.
+    return int(training.loc[mask, FEATURES_15].drop_duplicates().shape[0])
 
 
 def steel_limit_kg_m3(rules: DesignRules, steel_density: float) -> float:
@@ -405,6 +406,74 @@ def bound_warnings(features: pd.DataFrame, training_bounds: dict[str, tuple[floa
     return warnings
 
 
+def training_data_audit(training: pd.DataFrame, feature_cols: list[str]) -> dict[str, Any]:
+    """Kiểm tra dữ liệu X_train; KHÔNG có y nên không đánh giá sai số mô hình."""
+    missing = set(feature_cols) - set(training.columns)
+    if missing:
+        raise ValueError("Tệp train thiếu đặc trưng: " + ", ".join(sorted(missing)))
+    df = training.loc[:, feature_cols].apply(pd.to_numeric, errors="coerce")
+    valid = df.dropna()
+    constants = [col for col in feature_cols if valid[col].nunique(dropna=True) <= 1]
+    if valid.empty:
+        raise ValueError("Không có dòng train hợp lệ.")
+    return {
+        "total_rows": int(len(df)), "valid_rows": int(len(valid)),
+        "exact_duplicate_features": int(valid.duplicated().sum()),
+        "unique_feature_rows": int(len(valid.drop_duplicates())),
+        "constant_features": constants,
+        "with_fa_and_ggbfs_28d": int(((valid["Tro_bay"] > 0) &
+            (valid["Xil_lo_cao"] > 0) & (valid["Tuoi_duong_ho"] == 28)).sum()),
+    }
+
+
+def training_similarity(
+    mix: dict[str, float], age: float, fixed: dict[str, float],
+    feature_cols: list[str], training: pd.DataFrame, k: int = 5,
+) -> dict[str, Any]:
+    """Cảnh báo cấp phối xa dữ liệu train, KHÔNG phải khoảng tin cậy thống kê.
+
+    Euclid trên min-max của các đặc trưng biến thiên (giữ 15 biến đồng nhất với model).
+    Mốc 95% = phân vị khoảng cách đến láng giềng thứ k khác mình của các
+    bản ghi train *duy nhất*. Không phải xác suất đạt cường độ.
+    """
+    from sklearn.neighbors import NearestNeighbors
+    missing = set(feature_cols) - set(training.columns)
+    if missing:
+        raise ValueError("Thiếu đặc trưng huấn luyện: " + ", ".join(sorted(missing)))
+    reference = (training.loc[:, feature_cols]
+                 .apply(pd.to_numeric, errors="coerce").dropna().drop_duplicates())
+    if len(reference) < 3:
+        raise ValueError("Cần ít nhất 3 cấp phối huấn luyện khác nhau.")
+    row = feature_frame(pd.DataFrame([mix]), age, fixed, feature_cols)
+    spreads = reference.max() - reference.min()
+    varying = [c for c in feature_cols if spreads[c] > 1e-10]
+    if not varying:
+        raise ValueError("Dữ liệu không có đặc trưng biến thiên.")
+    low = reference[varying].min().to_numpy(dtype=float)
+    scale = spreads[varying].to_numpy(dtype=float)
+    arr = (reference[varying].to_numpy(dtype=float) - low) / scale
+    query = (row[varying].to_numpy(dtype=float) - low) / scale
+    divisor = np.sqrt(float(len(varying)))
+    use_k = min(int(k), len(reference) - 1)
+    if use_k < 1:
+        raise ValueError("Số láng giềng phải dương.")
+    nn = NearestNeighbors(n_neighbors=use_k + 1, algorithm="auto").fit(arr)
+    baseline = nn.kneighbors(arr, return_distance=True)[0][:, use_k] / divisor
+    distances = nn.kneighbors(query, return_distance=True)[0][0][:use_k] / divisor
+    dist = float(distances[-1])
+    reference_p95 = float(np.quantile(baseline, .95))
+    return {
+        "distance_k": dist,
+        "reference_p95": reference_p95,
+        "reference_median": float(np.median(baseline)),
+        "outside_typical_region": bool(dist > reference_p95 + 1e-12),
+        "features_used": varying,
+        "unique_training_mixes": int(len(reference)),
+        "k": use_k,
+        "method": "Khoảng cách min-max Euclid đến láng giềng thứ k; mốc P95 của dữ liệu train duy nhất",
+    }
+
+
 def optimize_mix(
     model: Any,
     feature_cols: list[str],
@@ -560,9 +629,21 @@ def optimize_mix(
             label = f"{LABELS[k]} tùy chọn"
         physical_checks[label] = ok
     warnings = list(extra)
+    similarity = None
+    if training is not None:
+        try:
+            similarity = training_similarity(proposal, age, fixed, feature_cols, training)
+            if similarity["outside_typical_region"]:
+                warnings.append(
+                    "Cấp phối xa vùng lân cận thường gặp của dữ liệu huấn luyện "
+                    "(theo chỉ số khoảng cách đa chiều). Kết quả AI có nguy cơ ngoại suy; "
+                    "chưa nên chấp nhận làm thiết kế thực tế."
+                )
+        except ValueError as err:
+            warnings.append(f"Không tính được chỉ số gần dữ liệu huấn luyện: {err}")
     if support_count is not None and support_count < 10:
         warnings.append(
-            f"Chỉ có {support_count} mẫu huấn luyện khớp tổ hợp đang chọn; "
+            f"Chỉ có {support_count} tổ hợp đặc trưng train khác nhau khớp điều kiện; "
             "độ tin cậy của tối ưu có thể thấp."
         )
     if proposal["Tro_bay"] == 0:
@@ -582,6 +663,7 @@ def optimize_mix(
         "binder_label": BINDER_CHOICES[rules.binder_mode],
         "material_policies": policies,
         "training_support_count": support_count,
+        "training_similarity": similarity,
         "feasible_candidates_seen": best_feasible["count"],
         "selected_from_feasible_candidates": selected_feasible,
         "steel_limit_kg_m3": fiber_cap_kg,
