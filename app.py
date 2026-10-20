@@ -180,9 +180,10 @@ def show_data_similarity(info: dict | None) -> None:
     else:
         st.info("Cấp phối tương đối gần các mẫu train theo chỉ số đã chọn. "
                 "**Điều này không bảo đảm cường độ nén hoặc độ chính xác dự đoán.**")
-    st.caption("Thước đo Euclid sau chuẩn hóa min-max các đặc trưng biến thiên, "
-               f"dùng láng giềng thứ {info['k']}; mốc 95% được tính trên train. "
-               "Không phải độ tin cậy 95%, không đánh giá độ chảy hoặc độ bền thực tế.")
+    st.caption(f"Tập tham chiếu: {info.get('scope', 'Toàn bộ train')}. "
+               "Khoảng cách Euclid sau chuẩn hóa min-max, "
+               f"láng giềng thứ {info['k']}; mốc P95 chỉ là ngưỡng sàng lọc từ train. "
+               "KHÔNG phải độ tin cậy 95%, không kiểm chứng độ chảy hoặc độ bền thực tế.")
 
 
 def show_calibration(bundle: dict, prediction: float) -> None:
@@ -232,9 +233,10 @@ tab_inverse, tab_forward, tab_importance, tab_dataset, tab_method = st.tabs([
 with tab_inverse:
     st.subheader("Thiết kế ngược — lựa chọn tổ hợp chất liên kết")
     st.write(
-        "**Differential Evolution theo lô** tối ưu lượng xi măng, đồng thời kiểm tra "
-        "cường độ AI mục tiêu, W/B, thể tích và đúng vật liệu đã chọn. "
-        "Các chế độ ít dữ liệu thực nghiệm có thể bị từ chối tối ưu để tránh ngoại suy."
+        "**Differential Evolution theo lô** tìm cấp phối có cường độ **dự đoán ≥ mức yêu cầu**, "
+        "kiểm tra W/B, thể tích và sợi thép. Bản mới sàng lọc độ gần dữ liệu train NGAY KHI "
+        "tối ưu, thay vì chỉ cảnh báo sau khi chọn nghiệm. Không chỉnh sửa số dự đoán để ép "
+        "về đúng cường độ mục tiêu."
     )
     binder_mode = st.selectbox(
         "**Lựa chọn tổ hợp chất liên kết**",
@@ -288,6 +290,25 @@ with tab_inverse:
         age = mid.number_input("Tuổi nén (ngày)", min_value=1, max_value=365, value=28, step=1)
         max_cement = right.number_input("Xi măng tối đa (kg/m³)", min_value=1.0, max_value=1500.0, value=850.0, step=25.0)
         mode = st.radio("Chế độ tìm kiếm", ["Nhanh", "Chuyên sâu"], horizontal=True)
+        st.markdown("#### 🔎 Kiểm soát ngoại suy trong lúc tối ưu")
+        safe_mode = st.radio(
+            "Phương pháp chọn cấp phối",
+            ["Ưu tiên độ tin cậy (khuyến nghị)", "Chỉ cảnh báo ngoại suy (đối chiếu v6)"],
+            horizontal=False,
+            help="Chế độ khuyến nghị buộc ứng viên phải có khoảng cách láng giềng "
+                 "không vượt mốc P95 của các mẫu train cùng tuổi và cùng tổ hợp vật liệu. "
+                 "Đây chỉ là cách sàng lọc, không phải bảo đảm cường độ 95%.",
+        )
+        similarity_policy = ("strict" if safe_mode.startswith("Ưu tiên") else "report_only")
+        prefer_near_target = st.checkbox(
+            "Ưu tiên cường độ dự đoán gần mức yêu cầu (không ép bằng mục tiêu)",
+            value=True,
+            help="Đối với yêu cầu 130 MPa, thuật toán chỉ ưu tiên ứng viên cao hơn 130 MPa "
+                 "ít nhất có thể; luôn hiển thị kết quả model tính thật. "
+                 "Nếu chưa có nghiệm gần mục tiêu, vẫn báo chính xác kết quả tìm được.",
+        )
+        st.caption("Nếu dữ liệu cùng tổ hợp quá ít hoặc không có nghiệm nằm trong vùng P95, "
+                   "app sẽ báo 'chưa tìm được' thay vì tự tạo ra cấp phối đạt.")
         with st.expander("Ràng buộc kỹ thuật — điều chỉnh theo đề tài và vật liệu thực tế"):
             a, b, c = st.columns(3)
             wb_min = a.number_input("W/B tối thiểu", min_value=0.05, max_value=0.50, value=0.14, step=0.01, format="%.2f")
@@ -338,6 +359,7 @@ with tab_inverse:
                 silica_mode=silica_mode, quartz_mode=quartz_mode,
                 min_silica=min_sf, min_quartz=min_qp,
                 max_steel_vol_percent=max_steel_pct, steel_saving_weight=steel_weight,
+                similarity_policy=similarity_policy, prefer_near_target=prefer_near_target,
             )
             rules.validate()
             if training is not None:
@@ -361,7 +383,16 @@ with tab_inverse:
     if result is not None:
         st.markdown(f"**Tổ hợp đã tối ưu:** {result['binder_label']}")
         if result["training_support_count"] is not None:
-            st.caption(f"Số tổ hợp đặc trưng train khác nhau khớp điều kiện: {result['training_support_count']}. Số nghiệm hợp lệ từng gặp trong tìm kiếm: {result['feasible_candidates_seen']}.")
+            st.caption(
+                f"Mẫu train duy nhất có cùng tuổi và tổ hợp vật liệu: "
+                f"{result['training_support_count']}. Nghiệm qua ràng buộc tìm được: "
+                f"{result['feasible_candidates_seen']}. "
+                "Đây không phải số thí nghiệm xác nhận cường độ cấp phối mới."
+            )
+        st.caption("**Chiến lược:** " + (
+            "Ràng buộc khoảng cách trong tối ưu" if result.get("similarity_policy") == "strict"
+            else "Chỉ cảnh báo khoảng cách (cách cũ, để đối chiếu)"
+        ))
         if result["feasible"]:
             validation = bundle.get("validation", {})
             q90 = validation.get("calibration_q90_abs_error_mpa") if isinstance(validation, dict) else None
@@ -369,7 +400,8 @@ with tab_inverse:
                 isinstance(q90, (int, float)) and 0 <= float(q90) < 1000
                 and result["prediction"] - float(q90) < result["target"]
             )
-            if result.get("training_similarity") and result["training_similarity"]["outside_typical_region"]:
+            if ((result.get("training_similarity") and result["training_similarity"]["outside_typical_region"]) or
+                (result.get("training_similarity_local") and result["training_similarity_local"]["outside_typical_region"])):
                 st.warning("Ứng viên thỏa các ràng buộc số học nhưng **xa dữ liệu huấn luyện**; "
                            "không nên sử dụng như cấp phối đã được kiểm chứng.")
             elif uncertain_target:
@@ -379,13 +411,24 @@ with tab_inverse:
             else:
                 st.success("Đã tìm thấy **phương án thỏa các ràng buộc đang chọn theo mô hình AI**. Chưa phải cấp phối được thí nghiệm xác nhận.")
         else:
-            st.error("**Chưa tìm được cấp phối thỏa toàn bộ điều kiện** trong ngân sách tối ưu này. Bảng bên dưới chỉ là ứng viên, **không được xem là cấp phối đạt yêu cầu**.")
+            st.error("**Chưa tìm được cấp phối đồng thời đáp ứng cường độ dự đoán, "
+                     "điều kiện vật lý và giới hạn ngoại suy đã chọn.** "
+                     "Bảng bên dưới chỉ là ứng viên chẩn đoán; KHÔNG phải cấp phối đạt yêu cầu.")
         col1, col2, col3 = st.columns(3)
         col1.metric("Cường độ AI dự đoán", f"{result['prediction']:.2f} MPa")
         col2.metric("Cường độ yêu cầu", f"{result['target']:.1f} MPa")
         col3.metric("Số phép dự đoán", f"{result['evaluations']:,}")
+        st.caption(
+            f"Chênh lệch **dự đoán – mục tiêu** = "
+            f"{result['prediction']-result['target']:+.2f} MPa. "
+            "Cường độ tối thiểu là điều kiện >=, không yêu cầu dự đoán phải "
+            "bằng chính xác giá trị nhập."
+        )
         show_calibration(bundle, result["prediction"])
+        st.markdown("#### Đánh giá vùng dữ liệu toàn tập")
         show_data_similarity(result.get("training_similarity"))
+        st.markdown("#### Đánh giá nhóm có cùng tuổi và tổ hợp vật liệu")
+        show_data_similarity(result.get("training_similarity_local"))
         show_ratios(result["mix"], densities, result["age"])
         st.caption(
             f"Sợi thép đề xuất: {result['mix']['Soi_thep']:.2f} kg/m³ "

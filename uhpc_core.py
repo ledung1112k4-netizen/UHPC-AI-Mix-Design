@@ -146,6 +146,11 @@ class DesignRules:
     # Trọng số kỹ thuật: 0 = chỉ giảm xi măng; >0 = ưu tiên giảm cả sợi.
     # Không đại diện chi phí thị trường, không dùng thay kết quả thí nghiệm.
     steel_saving_weight: float = 1.0
+    # strict: khoảng cách tới train được đưa vào hàm phạt VÀ điều kiện nghiệm.
+    # report_only: cách làm v6 (chỉ cảnh báo) dùng để đối chiếu, không bảo đảm tin cậy.
+    similarity_policy: str = "strict"
+    # Ưu tiên điểm dự đoán sát mức yêu cầu, nhưng không sửa kết quả AI thực tế.
+    prefer_near_target: bool = True
 
     def validate(self) -> None:
         if not (0 < self.wb_min <= self.wb_max < 1):
@@ -172,6 +177,10 @@ class DesignRules:
             raise ValueError("Trọng số ưu tiên giảm sợi thép phải thuộc 0–10.")
         if not np.isfinite(self.margin_mpa) or self.margin_mpa < 0:
             raise ValueError("Biên dự phòng cường độ không được âm.")
+        if self.similarity_policy not in {"strict", "report_only"}:
+            raise ValueError("Chế độ kiểm soát miền dữ liệu phải là strict hoặc report_only.")
+        if not isinstance(self.prefer_near_target, (bool, np.bool_)):
+            raise ValueError("Tùy chọn ưu tiên bám sát mục tiêu phải là True/False.")
 
 
 def material_policies(rules: DesignRules) -> dict[str, str]:
@@ -426,52 +435,101 @@ def training_data_audit(training: pd.DataFrame, feature_cols: list[str]) -> dict
     }
 
 
-def training_similarity(
-    mix: dict[str, float], age: float, fixed: dict[str, float],
-    feature_cols: list[str], training: pd.DataFrame, k: int = 5,
-) -> dict[str, Any]:
-    """Cảnh báo cấp phối xa dữ liệu train, KHÔNG phải khoảng tin cậy thống kê.
+def _similarity_reference_for_design(
+    training: pd.DataFrame, feature_cols: list[str],
+    age: float, rules: DesignRules, steel_density: float,
+) -> pd.DataFrame:
+    """Chọn train CÙNG TUỔI và trạng thái vật liệu, không nhầm mẫu 90/200 ngày.
 
-    Euclid trên min-max của các đặc trưng biến thiên (giữ 15 biến đồng nhất với model).
-    Mốc 95% = phân vị khoảng cách đến láng giềng thứ k khác mình của các
-    bản ghi train *duy nhất*. Không phải xác suất đạt cường độ.
+    Không có nhãn cường độ trong training_features.csv: gần vật liệu KHÔNG phải là
+    chứng cứ khả năng đạt cường độ. Dùng khoảng cách chỉ để sàng lọc ngoại suy.
     """
+    missing = set(feature_cols) - set(training.columns)
+    if missing:
+        raise ValueError("Tệp train thiếu đặc trưng: " + ", ".join(sorted(missing)))
+    all_rows = training.loc[:, feature_cols].apply(pd.to_numeric, errors="coerce").dropna()
+    same_age = np.isclose(all_rows["Tuoi_duong_ho"].to_numpy(), age, atol=1e-6)
+    mask = np.asarray(same_age, dtype=bool)
+    for name, policy in material_policies(rules).items():
+        vals = all_rows[name].to_numpy()
+        if policy == "off":
+            mask &= np.abs(vals) <= 1e-8
+        elif policy == "required":
+            mask &= vals >= material_minimum(rules, name) - 1e-8
+    steel = all_rows["Soi_thep"].to_numpy()
+    mask &= (steel >= -1e-8) & (steel <= steel_limit_kg_m3(rules, steel_density) + 1e-8)
+    return all_rows.loc[mask].drop_duplicates().reset_index(drop=True)
+
+
+def _prepare_similarity_index(
+    training: pd.DataFrame, feature_cols: list[str], k: int = 5,
+) -> dict[str, Any]:
+    """Tiền xử lý láng giềng đúng MỘT LẦN trước hàng nghìn lượt đánh giá."""
     from sklearn.neighbors import NearestNeighbors
     missing = set(feature_cols) - set(training.columns)
     if missing:
         raise ValueError("Thiếu đặc trưng huấn luyện: " + ", ".join(sorted(missing)))
-    reference = (training.loc[:, feature_cols]
-                 .apply(pd.to_numeric, errors="coerce").dropna().drop_duplicates())
-    if len(reference) < 3:
-        raise ValueError("Cần ít nhất 3 cấp phối huấn luyện khác nhau.")
-    row = feature_frame(pd.DataFrame([mix]), age, fixed, feature_cols)
+    reference = (training.loc[:, feature_cols].apply(pd.to_numeric, errors="coerce")
+                 .dropna().drop_duplicates())
+    if len(reference) < 6:
+        raise ValueError(
+            f"Chỉ có {len(reference)} tổ hợp train duy nhất cùng điều kiện; "
+            "cần tối thiểu 6 để dùng chỉ số láng giềng thứ 5."
+        )
     spreads = reference.max() - reference.min()
     varying = [c for c in feature_cols if spreads[c] > 1e-10]
     if not varying:
         raise ValueError("Dữ liệu không có đặc trưng biến thiên.")
-    low = reference[varying].min().to_numpy(dtype=float)
+    lo = reference[varying].min().to_numpy(dtype=float)
     scale = spreads[varying].to_numpy(dtype=float)
-    arr = (reference[varying].to_numpy(dtype=float) - low) / scale
-    query = (row[varying].to_numpy(dtype=float) - low) / scale
-    divisor = np.sqrt(float(len(varying)))
+    arr = (reference[varying].to_numpy(dtype=float) - lo) / scale
     use_k = min(int(k), len(reference) - 1)
-    if use_k < 1:
+    if use_k <= 0:
         raise ValueError("Số láng giềng phải dương.")
     nn = NearestNeighbors(n_neighbors=use_k + 1, algorithm="auto").fit(arr)
-    baseline = nn.kneighbors(arr, return_distance=True)[0][:, use_k] / divisor
-    distances = nn.kneighbors(query, return_distance=True)[0][0][:use_k] / divisor
-    dist = float(distances[-1])
-    reference_p95 = float(np.quantile(baseline, .95))
+    # Khi truy vấn chính tập train, láng giềng đầu là chính nó (khoảng cách 0).
+    baseline = nn.kneighbors(arr, n_neighbors=use_k + 1, return_distance=True)[0][:, use_k]
+    divisor = np.sqrt(float(len(varying)))
     return {
-        "distance_k": dist,
-        "reference_p95": reference_p95,
-        "reference_median": float(np.median(baseline)),
-        "outside_typical_region": bool(dist > reference_p95 + 1e-12),
-        "features_used": varying,
+        "nn": nn, "lo": lo, "scale": scale, "varying": varying,
+        "divisor": divisor, "k": use_k,
+        "reference_p95": float(np.quantile(baseline / divisor, 0.95)),
+        "reference_median": float(np.median(baseline / divisor)),
         "unique_training_mixes": int(len(reference)),
-        "k": use_k,
-        "method": "Khoảng cách min-max Euclid đến láng giềng thứ k; mốc P95 của dữ liệu train duy nhất",
     }
+
+
+def _candidate_distances(feature_rows: pd.DataFrame, context: dict[str, Any]) -> np.ndarray:
+    arr = (feature_rows.loc[:, context["varying"]].to_numpy(dtype=float) - context["lo"]) / context["scale"]
+    distances = context["nn"].kneighbors(
+        arr, n_neighbors=context["k"], return_distance=True
+    )[0][:, -1] / context["divisor"]
+    return np.asarray(distances, dtype=float)
+
+
+def _similarity_summary(distance: float, context: dict[str, Any], *, scope: str) -> dict[str, Any]:
+    p95 = context["reference_p95"]
+    return {
+        "distance_k": float(distance), "reference_p95": p95,
+        "reference_median": context["reference_median"],
+        "outside_typical_region": bool(distance > p95 + 1e-12),
+        "features_used": context["varying"],
+        "unique_training_mixes": context["unique_training_mixes"],
+        "k": context["k"],
+        "scope": scope,
+        "method": "Min-max Euclid đến láng giềng thứ k trên các mẫu train duy nhất; P95 chỉ là mốc sàng lọc, không phải độ tin cậy 95%",
+    }
+
+
+def training_similarity(
+    mix: dict[str, float], age: float, fixed: dict[str, float],
+    feature_cols: list[str], training: pd.DataFrame, k: int = 5,
+) -> dict[str, Any]:
+    """Khoảng cách tới train toàn tập (bài toán thuận). Không phải khoảng tin cậy."""
+    ctx = _prepare_similarity_index(training, feature_cols, k=k)
+    features = feature_frame(pd.DataFrame([mix]), age, fixed, feature_cols)
+    d = float(_candidate_distances(features, ctx)[0])
+    return _similarity_summary(d, ctx, scope="Toàn bộ dữ liệu huấn luyện")
 
 
 def optimize_mix(
@@ -512,21 +570,35 @@ def optimize_mix(
         if not lo - 1e-8 <= val <= hi + 1e-8:
             raise ValueError(f"{k}={val:g} nằm ngoài miền huấn luyện [{lo:g}, {hi:g}]; không tối ưu ngoại suy.")
 
-    # Nếu không có dữ liệu train, không được giả định tổ hợp chưa thấy là đã được học.
+    # Kiểm tra vùng dữ liệu PHẢI xảy ra TRONG quá trình tối ưu, không chỉ sau.
+    # Nguồn tham chiếu chỉ gồm cấp phối có cùng tuổi và tổ hợp vật liệu được chọn.
     support_count = None
+    similarity_context = None
+    global_similarity_context = None
     if training is not None:
-        support_count = count_training_matches(training, rules, densities["Soi_thep"])
-        if support_count == 0:
+        local_reference = _similarity_reference_for_design(
+            training, feature_cols, age, rules, densities["Soi_thep"]
+        )
+        support_count = len(local_reference)
+        if support_count < 6:
             raise ValueError(
-                "Không có mẫu huấn luyện nào khớp tổ hợp chất liên kết và ngưỡng tối thiểu "
-                "đang chọn. Hãy chọn tổ hợp có dữ liệu thực, hoặc bổ sung dữ liệu và huấn luyện lại; "
-                "không tối ưu ngoài phân bố này."
+                f"Chỉ có {support_count} mẫu train duy nhất cùng tuổi {age:g} ngày và "
+                "tổ hợp vật liệu đã chọn. Không đủ cơ sở để sàng lọc khoảng cách; "
+                "hãy bổ sung dữ liệu thực nghiệm hoặc đổi tổ hợp."
             )
+        similarity_context = _prepare_similarity_index(local_reference, feature_cols)
+        # Đánh giá song song toàn train để tránh P95 cục bộ quá rộng khi chỉ
+        # có vài chục mẫu: cần thỏa cả hai ngưỡng, tuyệt đối không đánh tráo
+        # ngưỡng của nhóm này cho khoảng cách của nhóm kia.
+        global_similarity_context = _prepare_similarity_index(training, feature_cols)
     elif rules.binder_mode != "BOTH" or rules.silica_mode != "optional" or rules.quartz_mode != "optional":
         raise ValueError(
             "Cần assets/training_features.csv để xác minh dữ liệu cho tổ hợp chất liên kết "
             "đã chọn. Hiện chỉ giữ chế độ mặc định khi chưa có tệp này."
         )
+
+    if rules.similarity_policy == "strict" and similarity_context is None:
+        raise ValueError("Tối ưu có giới hạn khoảng cách cần assets/training_features.csv.")
 
     fiber_cap_kg = steel_limit_kg_m3(rules, densities["Soi_thep"])
     bds = material_search_bounds(training_bounds, rules, max_cement, densities["Soi_thep"])
@@ -561,8 +633,29 @@ def optimize_mix(
         steel_mass = mix_arr[:, index["Soi_thep"]]
         # Điểm mục tiêu chỉ dùng trong tối ưu, KHÔNG biểu diễn giá tiền hay cường độ.
         weighted_material_score = mix_arr[:, index["Xi_mang"]] + rules.steel_saving_weight * steel_mass
+        # Chỉ ƯU TIÊN (không ép) kết quả gần mục tiêu; dự đoán vẫn do model thật trả về.
+        excessive_strength = np.maximum(predictions - (target_mpa + rules.margin_mpa), 0.0)
+        near_target_penalty = 2.0 * excessive_strength if rules.prefer_near_target else np.zeros(len(df))
+        if similarity_context is not None:
+            local_distances = _candidate_distances(features_frame, similarity_context)
+            global_distances = _candidate_distances(features_frame, global_similarity_context)
+            local_limit = similarity_context["reference_p95"]
+            global_limit = global_similarity_context["reference_p95"]
+            close_to_train = ((local_distances <= local_limit + 1e-12) &
+                              (global_distances <= global_limit + 1e-12))
+            local_violation = np.maximum(local_distances / max(local_limit, 1e-8) - 1.0, 0.0)
+            global_violation = np.maximum(global_distances / max(global_limit, 1e-8) - 1.0, 0.0)
+        else:
+            close_to_train = np.ones(len(df), dtype=bool)
+            local_violation = global_violation = np.zeros(len(df))
+        # Ngưỡng cục bộ và toàn tập được chuẩn hóa riêng để không so sánh sai.
+        distance_penalty = (
+            1.0e5 * (local_violation ** 2 + global_violation ** 2)
+            if similarity_context is not None and rules.similarity_policy == "strict"
+            else np.zeros(len(df))
+        )
         loss = (
-            weighted_material_score
+            weighted_material_score + near_target_penalty + distance_penalty
             + 1.0e4 * shortage ** 2
             + 1.0e6 * outside(wb, rules.wb_min, rules.wb_max) ** 2
             + 1.0e6 * outside(
@@ -583,13 +676,17 @@ def optimize_mix(
             & (abs(vol - target_volume) <= rules.volume_tolerance + 1e-7)
             & (steel_mass <= fiber_cap_kg + 1e-7)
             & in_bounds
+            & (close_to_train if rules.similarity_policy == "strict" else True)
         )
         total_call[0] += len(df)
         best_feasible["count"] += int(feasible.sum())
         if feasible.any():
             choices = np.flatnonzero(feasible)
-            lowest = choices[np.argmin(weighted_material_score[choices])]
-            score = weighted_material_score[lowest]
+            # Trong các nghiệm đáp ứng kỹ thuật + miền dữ liệu, ưu tiên ít vật liệu
+            # và không vượt quá xa cường độ yêu cầu.
+            candidate_scores = weighted_material_score + near_target_penalty
+            lowest = choices[np.argmin(candidate_scores[choices])]
+            score = candidate_scores[lowest]
             if score < best_feasible["score"]:
                 best_feasible["score"] = float(score)
                 best_feasible["x"] = mix_arr[lowest].copy()
@@ -605,9 +702,21 @@ def optimize_mix(
     proposal = dict(zip(MATERIALS, map(float, selected)))
     predicted = predict(model, proposal, age, fixed, feature_cols)
     measures = physical_quantities(pd.DataFrame([proposal]), densities).iloc[0]
-    extra = bound_warnings(
-        feature_frame(pd.DataFrame([proposal]), age, fixed, feature_cols), training_bounds
-    )
+    proposal_frame = feature_frame(pd.DataFrame([proposal]), age, fixed, feature_cols)
+    extra = bound_warnings(proposal_frame, training_bounds)
+    final_similarity = None
+    final_similarity_local = None
+    if similarity_context is not None:
+        local_d = float(_candidate_distances(proposal_frame, similarity_context)[0])
+        global_d = float(_candidate_distances(proposal_frame, global_similarity_context)[0])
+        final_similarity_local = _similarity_summary(
+            local_d, similarity_context,
+            scope=f"Mẫu train cùng tuổi {age:g} ngày và tổ hợp vật liệu đã chọn",
+        )
+        final_similarity = _similarity_summary(
+            global_d, global_similarity_context,
+            scope="Toàn bộ dữ liệu train (bộ kiểm tra chéo miền dữ liệu)",
+        )
     physical_checks = {
         "Cường độ AI ≥ mục tiêu + biên dự phòng": predicted + 1e-7 >= target_mpa + rules.margin_mpa,
         "W/B trong giới hạn": rules.wb_min - 1e-7 <= measures["W_B"] <= rules.wb_max + 1e-7,
@@ -617,6 +726,13 @@ def optimize_mix(
             proposal["Soi_thep"] <= fiber_cap_kg + 1e-7
         ),
     }
+    if rules.similarity_policy == "strict":
+        physical_checks["Khoảng cách tới toàn train ≤ mốc P95 toàn train"] = bool(
+            final_similarity is not None and not final_similarity["outside_typical_region"]
+        )
+        physical_checks["Khoảng cách tới nhóm cùng tuổi/tổ hợp ≤ mốc P95 nhóm"] = bool(
+            final_similarity_local is not None and not final_similarity_local["outside_typical_region"]
+        )
     for k, policy in policies.items():
         if policy == "off":
             ok = abs(proposal[k]) <= 1e-8
@@ -629,18 +745,19 @@ def optimize_mix(
             label = f"{LABELS[k]} tùy chọn"
         physical_checks[label] = ok
     warnings = list(extra)
-    similarity = None
-    if training is not None:
-        try:
-            similarity = training_similarity(proposal, age, fixed, feature_cols, training)
-            if similarity["outside_typical_region"]:
-                warnings.append(
-                    "Cấp phối xa vùng lân cận thường gặp của dữ liệu huấn luyện "
-                    "(theo chỉ số khoảng cách đa chiều). Kết quả AI có nguy cơ ngoại suy; "
-                    "chưa nên chấp nhận làm thiết kế thực tế."
-                )
-        except ValueError as err:
-            warnings.append(f"Không tính được chỉ số gần dữ liệu huấn luyện: {err}")
+    similarity = final_similarity
+    if (similarity is not None and similarity["outside_typical_region"]) or (
+        final_similarity_local is not None and final_similarity_local["outside_typical_region"]
+    ):
+        warnings.append(
+            "Cấp phối ngoài miền lân cận thông thường ở tập train toàn cục "
+            "hoặc nhóm cùng tuổi/tổ hợp; nguy cơ ngoại suy."
+        )
+    if rules.similarity_policy == "strict" and best_feasible["x"] is None:
+        warnings.append(
+            "Không tìm được nghiệm vừa đạt cường độ dự đoán, điều kiện vật lý VÀ "
+            "khoảng cách P95. Không được nâng cường độ dự đoán giả hoặc tự nới ngưỡng để báo đạt."
+        )
     if support_count is not None and support_count < 10:
         warnings.append(
             f"Chỉ có {support_count} tổ hợp đặc trưng train khác nhau khớp điều kiện; "
@@ -664,6 +781,9 @@ def optimize_mix(
         "material_policies": policies,
         "training_support_count": support_count,
         "training_similarity": similarity,
+        "training_similarity_local": final_similarity_local,
+        "similarity_policy": rules.similarity_policy,
+        "prefer_near_target": rules.prefer_near_target,
         "feasible_candidates_seen": best_feasible["count"],
         "selected_from_feasible_candidates": selected_feasible,
         "steel_limit_kg_m3": fiber_cap_kg,
