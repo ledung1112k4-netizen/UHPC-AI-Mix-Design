@@ -1,4 +1,4 @@
-"""UHPC AI STUDIO 2.2: no invented reference mixtures, predictions or validation.
+"""UHPC AI STUDIO 2.0: no invented reference mixtures, predictions or validation.
 
 GitHub drop-in: this app reads existing assets/uhpc_model.pkl and
 assets/training_features.csv and keeps your existing uhpc_core.py untouched.
@@ -19,8 +19,7 @@ from uhpc_core import MATERIALS, FEATURES_15, LABELS, DEFAULT_FIXED, DEFAULT_DEN
 from uhpc_quality import (
     AuditError, batch_table, check_mix, cost_table, distance_check,
     distance_reference, evaluate_validation, feature_frame, load_bundle,
-    load_training, optimize, physical, predict, request_id, verify_design,
-    strength_alignment, validation_near_target,
+    load_training, optimize, physical, predict, request_id, verify_design, target_match,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -28,8 +27,10 @@ MODEL_CANDIDATES = [ROOT/"assets"/"uhpc_model.pkl", ROOT/"model"/"uhpc_model.pkl
 TRAIN_CANDIDATES = [ROOT/"assets"/"training_features.csv", ROOT/"data"/"training_features.csv", ROOT/"data"/"uhpc_reference.csv"]
 MODEL_PATH = next((x for x in MODEL_CANDIDATES if x.exists()),MODEL_CANDIDATES[0])
 TRAIN_PATH = next((x for x in TRAIN_CANDIDATES if x.exists()),TRAIN_CANDIDATES[0])
+# Mức dung sai dự báo của chế độ bám sát mục tiêu, KHÔNG phải sai số thí nghiệm.
+TARGET_TOLERANCE_MPA = 0.01
 
-st.set_page_config(page_title="UHPC AI Studio 2.2", page_icon="🧱",layout="wide",initial_sidebar_state="expanded")
+st.set_page_config(page_title="UHPC AI Studio 2.0", page_icon="🧱",layout="wide",initial_sidebar_state="expanded")
 st.markdown("""<style>
 @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap');
 html,body,[class*="css"], [data-testid="stAppViewContainer"] {font-family:'Be Vietnam Pro','Segoe UI',sans-serif;}
@@ -69,26 +70,10 @@ except Exception as exc:
 
 with st.sidebar:
     st.markdown("## 🧱 UHPC AI STUDIO")
-    st.caption("PHÒNG THÍ NGHIỆM THIẾT KẾ CẤP PHỐI · 2.2")
+    st.caption("PHÒNG THÍ NGHIỆM THIẾT KẾ CẤP PHỐI · 2.0")
     age=st.number_input("Tuổi nén (ngày)",min_value=1,max_value=365,value=28,step=1)
     target=st.number_input("Cường độ mục tiêu (MPa)",min_value=1.,max_value=300.,value=120.,step=5.)
-    match_options={
-        "Sát mục tiêu, không thấp hơn":"min_close",
-        "Sát mục tiêu trong khoảng ±":"band",
-        "Chỉ cần đạt tối thiểu":"minimum_only",
-    }
-    target_mode_label=st.selectbox("Cách so sánh với cường độ nhập",list(match_options),index=0,
-                                   help="Mặc định ưu tiên dự báo nằm ngay phía trên cường độ nhập, không chấp nhận vượt quá dung sai.")
-    target_mode=match_options[target_mode_label]
-    target_tolerance=st.number_input("Dung sai khớp dự báo (MPa)",min_value=0.001,max_value=100.,value=0.01,step=.01,format="%.3f",
-                                     help="Mặc định 0,01 MPa: nhập 120 → khoảng 120–120,01 MPa khi chọn 'không thấp hơn'. Đây KHÔNG phải độ chính xác thực nghiệm.")
-    margin=st.number_input("Biên dự phòng số học (MPa)",min_value=0.,max_value=50.,value=0.,step=.5,help="Áp dụng khi cần đạt tối thiểu hoặc sát từ phía trên. Không phải khoảng tin cậy.")
-    if target_mode=="band":
-        st.caption(f"Khoảng chấp nhận dự báo: {target-target_tolerance:g}–{target+target_tolerance:g} MPa. Có thể thấp hơn mục tiêu; biên dự phòng không áp dụng ở chế độ ±.")
-    elif target_mode=="min_close":
-        st.caption(f"Khoảng chấp nhận dự báo: {target+margin:g}–{target+margin+target_tolerance:g} MPa.")
-    else:
-        st.caption(f"Chấp nhận mọi mức dự báo ≥ {target+margin:g} MPa; không ràng buộc độ sát.")
+    margin=st.number_input("Biên dự phòng số học (MPa)",min_value=0.,max_value=50.,value=0.,step=1.,help="Không phải khoảng tin cậy; khi có calibration độc lập, xem riêng phần kiểm định.")
     batch_mode=st.radio("Đơn vị mẻ",["kg","m³"],horizontal=True)
     batch_size=st.number_input("Quy mô mẻ",min_value=.001,max_value=100000.,value=50. if batch_mode=="kg" else 1.,step=5. if batch_mode=="kg" else .1)
     st.divider()
@@ -123,8 +108,7 @@ st.caption("**Phân biệt:** W/B = nước / (xi măng + tro bay + GGBFS + sili
 
 
 def common_payload():
-    return dict(age=age,target=target,margin=margin,target_mode=target_mode,
-                target_tolerance=target_tolerance,batch_size=batch_size,batch_mode=batch_mode,
+    return dict(age=age,target=target,margin=margin,batch_size=batch_size,batch_mode=batch_mode,
                 wb_min=wb_min,wb_max=wb_max,steel_limit=steel_limit,air_percent=air_percent,
                 vol_tol=vol_tol,cement_max=cement_max,require_fa=require_fa,
                 require_ggbfs=require_ggbfs,require_quartz=require_quartz,densities=densities,
@@ -149,9 +133,7 @@ def render_result(result, *, provenance):
     prediction=float(result["prediction"])
     q,checks=verify_design(mix,densities,wb_min=wb_min,wb_max=wb_max,air=air_percent/100,volume_tol=vol_tol,
                            steel_limit_percent=steel_limit,require_fa=require_fa,require_ggbfs=require_ggbfs,
-                           require_quartz=require_quartz,cement_max=cement_max,target=None)
-    alignment=strength_alignment(prediction,target,mode=target_mode,tolerance=target_tolerance,margin=margin)
-    checks["Cường độ AI nằm trong khoảng cho phép"]=alignment["meets_policy"]
+                           require_quartz=require_quartz,cement_max=cement_max,target=target,predicted=prediction,margin=margin)
     proximity=None
     if train is not None:
         proximity=distance_check(feature_frame(pd.DataFrame([mix]),age,result["fixed"],cols),train)
@@ -160,34 +142,35 @@ def render_result(result, *, provenance):
     if result.get("checks"):
         checks.update(result["checks"])
     all_pass=all(checks.values())
+    align=target_match(prediction,target,margin=margin,tolerance=TARGET_TOLERANCE_MPA)
+    near_mode=result.get("mode")=="near_target"
     st.subheader("Báo cáo cấp phối")
     st.caption(provenance+" · Kết quả AI, chưa kiểm chứng thực nghiệm độc lập.")
-    s1,s2,s3,s4,s5=st.columns(5)
-    s1.metric("AI dự báo (không ép số)",f"{prediction:.4f} MPa",f"{alignment['delta_mpa']:+.4f} MPa so với lệnh")
-    s2.metric("Độ lệch so với lệnh",f"{alignment['absolute_delta_mpa']:.4f} MPa",f"{alignment['absolute_delta_percent']:.4f}% mục tiêu",delta_color="off")
-    s3.metric("W/B",f"{q['W_B']:.3f}")
-    s4.metric("W/P* mô hình",f"{q['W_P_notebook']:.3f}")
-    s5.metric("Sợi thép",f"{q['steel_vol_percent']:.2f}% thể tích")
-    accepted=(f"{alignment['lower_mpa']:.2f}–{alignment['upper_mpa']:.2f} MPa"
-              if alignment['upper_mpa'] is not None else f"≥ {alignment['lower_mpa']:.2f} MPa")
-    st.caption(f"Khoảng cường độ AI chấp nhận: **{accepted}**. Độ lệch ở đây so với cường độ bạn NHẬP, không phải sai số so với thí nghiệm thực tế.")
-    if result.get("candidate_tier")=="safe_outside_target":
-        st.warning("Không có nghiệm đúng dung sai trong số ứng viên đã kiểm tra. Đây là cấp phối hợp lệ về ràng buộc được tìm thấy gần mục tiêu nhất, nhưng **không khớp cường độ yêu cầu**.")
-    elif result.get("candidate_tier")=="no_safe_candidate":
-        st.error("Không tìm thấy ứng viên qua kiểm tra kỹ thuật. Không nên sử dụng cấp phối này.")
-    if result.get("candidate_origin"):
-        st.caption("Nguồn ứng viên: " + result["candidate_origin"] + ". Giá trị cường độ là dự báo của mô hình, không phải giá trị đo.")
-    if alignment["same_to_2_decimals"] and not alignment["exact_numeric_match"]:
-        st.caption("Cường độ dự báo trùng mục tiêu khi **làm tròn 2 chữ số**, không phải bằng nhau tuyệt đối.")
+    s1,s2,s3,s4=st.columns(4)
+    s1.metric("Cường độ AI dự báo",f"{prediction:.4f} MPa",f"{align['delta_mpa']:+.4f} MPa")
+    s2.metric("W/B",f"{q['W_B']:.3f}")
+    s3.metric("W/P* của mô hình",f"{q['W_P_notebook']:.3f}")
+    s4.metric("Sợi thép",f"{q['steel_vol_percent']:.2f}% thể tích")
+    st.caption(f"So với mức nhập {target:g} MPa: sai lệch tuyệt đối {align['absolute_delta_mpa']:.4f} MPa "
+               f"({align['absolute_delta_percent']:.3f}%). "
+               + (f"Dự báo sát mục tiêu trong khoảng {TARGET_TOLERANCE_MPA:g} MPa phía trên. " if align['near_from_above'] else
+                  f"Dự báo chưa sát mục tiêu trong khoảng {TARGET_TOLERANCE_MPA:g} MPa phía trên. ")
+               + "Đây là chênh lệch so với **mục tiêu nhập**, KHÔNG phải sai số AI so với cường độ thí nghiệm.")
     if all_pass:
-        if target_mode=="band" and not alignment["meets_minimum"]:
-            st.warning("Đã khớp dải ± dung sai và các kiểm tra số học, NHƯNG thấp hơn cường độ nhập; không công nhận đạt điều kiện cường độ tối thiểu.")
-        elif target_mode=="minimum_only" and alignment["absolute_delta_mpa"]>target_tolerance:
-            st.warning("Đạt cường độ tối thiểu theo dự báo nhưng chưa sát trong dung sai đang nhập; hãy chọn 'Sát mục tiêu, không thấp hơn' nếu muốn giới hạn phần vượt.")
+        if near_mode:
+            st.success(f"Các ràng buộc số học đạt và AI dự báo nằm trong khoảng mục tiêu + 0 đến +{TARGET_TOLERANCE_MPA:g} MPa. Không phải xác nhận nén thực nghiệm.")
+        elif align['near_from_above']:
+            st.success("Đạt các điều kiện số học và dự báo gần cường độ mục tiêu. Chưa kiểm chứng nén thực nghiệm.")
         else:
-            st.success("Dự báo AI đạt khoảng mục tiêu và các điều kiện số học đã chọn. Chưa có xác nhận cường độ thực nghiệm.")
+            st.warning("Đạt các điều kiện số học theo dự đoán AI, nhưng không bám sát cường độ nhập. Chưa kiểm chứng thực nghiệm.")
     else:
-        st.error("Kết quả CHƯA khớp đủ điều kiện cường độ hoặc kỹ thuật đã chọn. Không được công nhận là cấp phối đạt.")
+        st.error("Chưa đáp ứng đủ điều kiện thiết kế số hoặc chưa sát cường độ yêu cầu. Không được coi là cấp phối đã đạt yêu cầu.")
+    if result.get("candidate_origin"):
+        st.caption("Nguồn ứng viên: " + result["candidate_origin"])
+    if near_mode and result.get("candidate_tier") in ("safe_but_not_matching","safe_above_not_matching"):
+        st.warning("Thuật toán tìm thấy phương án đáp ứng các kiểm tra kỹ thuật nhưng dự báo chưa khớp khoảng cường độ yêu cầu; không làm tròn hoặc sửa số dự báo thành mục tiêu.")
+    elif near_mode and result.get("candidate_tier")=="no_physically_safe_candidate":
+        st.error("Thuật toán chưa tìm được phương án thỏa các ràng buộc kỹ thuật. Bảng số chỉ là ứng viên thử, KHÔNG đủ điều kiện đề xuất.")
     c1,c2=st.columns([1.15,.85])
     with c1:
         table=batch_table(mix,batch_mode,batch_size)
@@ -212,9 +195,9 @@ def render_result(result, *, provenance):
         st.warning("Bộ giải không xác nhận hội tụ. Ứng viên được tìm thấy không phải nghiệm tối ưu toàn cục được chứng minh.")
     out=table.copy()
     out.loc[len(out)] = ["TỔNG CỘNG",out["kg/m³"].sum(),out["Mẻ trộn (kg)"].sum(),100.]
-    export={"origin":provenance,"age_days":int(age),"target_mpa":float(target),"predicted_mpa":prediction,
-            "strength_alignment":alignment,"validated_in_lab":False,
+    export={"origin":provenance,"age_days":int(age),"target_mpa":float(target),"predicted_mpa":prediction,"validated_in_lab":False,
             "pass_numerical_checks":bool(all_pass),"checks":checks,"physical_quantities":q,"mix_kg_m3":mix,
+            "comparison_to_target":align,"matching_is_not_lab_accuracy":True,
             "model_features":list(cols),"proximity_p95_is_not_confidence":True}
     a,b=st.columns(2)
     a.download_button("⬇ Tải cấp phối CSV",out.to_csv(index=False).encode("utf-8-sig"),"UHPC_cap_phoi.csv", "text/csv",use_container_width=True)
@@ -235,13 +218,12 @@ t1,t2,t3,t4,t5=st.tabs(["🎯 Thiết kế ngược","🧪 Dự báo cấp phố
 
 with t1:
     st.subheader("Thiết kế theo cường độ nén mục tiêu")
-    st.write("Thuật toán xem xét cấp phối từ dữ liệu huấn luyện và tìm kiếm bằng **Differential Evolution**, trong dải P5–P95 vật liệu cùng tuổi. Khi không có nghiệm chính xác, hiển thị **gần nhất tìm được** có qua kiểm tra kỹ thuật, không gán cường độ bằng giá trị nhập.")
-    st.info("Nhập 120 MPa, mặc định dung sai 0,01 MPa: app cố tìm 120,0000–120,0100 MPa và ưu tiên gần 120,0000 nhất. Nếu mô hình không dự báo được trong khoảng này, app hiển thị phương án hợp lệ gần nhất tìm được và báo KHÔNG KHỚP; tuyệt đối không đổi số dự báo thành 120.")
+    st.write("Thuật toán **Differential Evolution** chọn ứng viên trong dải phân vị P5–P95 của dữ liệu thật có cùng tuổi nén; kiểm tra lại ràng buộc sau tối ưu.")
+    st.caption(f"Mặc định ưu tiên cường độ AI dự báo gần mức đã nhập nhưng không thấp hơn. Dung sai bám sát: {TARGET_TOLERANCE_MPA:g} MPa; nếu không tìm được, báo 'chưa khớp' thay vì sửa con số dự đoán.")
     with st.form("opt_form"):
         o1,o2=st.columns(2)
         with o1:
-            opt_mode=st.selectbox("Mục tiêu tối ưu",["Dự đoán sát cường độ nhập","Giảm xi măng và sợi","Giảm chi phí vật liệu"],index=0,
-                                  help="Ưu tiên độ lệch giữa cường độ dự báo và cường độ nhập; xi măng chỉ là yếu tố phụ khi cùng độ lệch.")
+            opt_mode=st.selectbox("Mục tiêu tối ưu",["Giảm xi măng và sợi","Dự đoán gần mục tiêu","Giảm chi phí vật liệu"],index=1)
             strict=st.checkbox("Bắt buộc gần dữ liệu train (P95 NN)",value=True)
             min_present=st.number_input("Vật liệu bắt buộc: lượng tối thiểu (kg/m³)",min_value=.1,max_value=100.,value=5.,step=1.,help="Ngưỡng nghiên cứu để tránh nghiệm vật liệu > 0 nhưng gần bằng 0; không phải quy phạm.")
         with o2:
@@ -249,15 +231,13 @@ with t1:
             f_opt={}
             for k in DEFAULT_FIXED:
                 f_opt[k]=st.number_input(k,value=float(DEFAULT_FIXED[k]),key="opt_"+k)
-            search_depth=st.selectbox("Mức tìm kiếm",["Chuyên sâu (ưu tiên bám sát)","Nhanh (tham khảo)"],index=0,
-                                      help="Chuyên sâu tăng vòng lặp và quần thể, có thể tìm nghiệm gần mục tiêu hơn nhưng mất thời gian hơn.")
             seed=st.number_input("Seed tái lập tối ưu",min_value=0,max_value=1000000,value=42)
         st.caption("Nếu tối ưu chi phí, hãy nhập giá cho toàn bộ vật liệu có thể xuất hiện trong miền tìm kiếm, ở tab Dự toán.")
         go_opt=st.form_submit_button("TÌM CẤP PHỐI PHÙ HỢP",type="primary",disabled=model is None or train is None,use_container_width=True)
     price_raw={k:st.session_state.get("unitprice_"+k) for k in MATERIALS}
     prices_opt={k:(float(v) if v is not None else float("nan")) for k,v in price_raw.items()}
     opt_params={**common_payload(),"opt_mode":opt_mode,"strict":strict,"min_present":min_present,"seed":seed,"f_opt":f_opt,
-                "prices": prices_opt if opt_mode=="Giảm chi phí vật liệu" else None,"search_depth":search_depth}
+                "prices": prices_opt if opt_mode=="Giảm chi phí vật liệu" else None}
     opt_sig=request_id(opt_params)
     if go_opt:
         try:
@@ -265,11 +245,8 @@ with t1:
                            air=air_percent/100,volume_tol=vol_tol,steel_limit_percent=steel_limit,
                            require_fa=require_fa,require_ggbfs=require_ggbfs,require_quartz=require_quartz,
                            cement_max=cement_max,min_present_kg=min_present,margin=margin,use_distance=strict,
-                           target_mode=target_mode,target_tolerance=target_tolerance,
-                           objective_mode={"Giảm xi măng và sợi":"cement","Dự đoán sát cường độ nhập":"near_target","Giảm chi phí vật liệu":"cost"}[opt_mode],
-                           prices=prices_opt,seed=seed,
-                           maxiter=75 if search_depth.startswith("Chuyên sâu") else 38,
-                           popsize=10 if search_depth.startswith("Chuyên sâu") else 7)
+                           objective_mode={"Giảm xi măng và sợi":"cement","Dự đoán gần mục tiêu":"near_target","Giảm chi phí vật liệu":"cost"}[opt_mode],
+                           prices=prices_opt,seed=seed,target_tolerance=TARGET_TOLERANCE_MPA)
             result["fixed"]=f_opt
             result["enforce_distance"]=strict
             st.session_state["opt_result"]={"fingerprint":opt_sig,"data":result}
@@ -358,8 +335,6 @@ with t3:
             except Exception as exc:st.warning("Không đọc được feature importance: "+str(exc))
     st.markdown("#### Kiểm định mô hình bằng tệp CSV có cường độ đo")
     st.caption("CSV phải có đủ 15 đặc trưng (tên giống trong notebook) và cột `Cuong_do_nen_MPa` hoặc tên tương đương. Chỉ tải dữ liệu do bạn có quyền sử dụng. Nguồn kiểm định cần **độc lập** với dữ liệu huấn luyện để đánh giá khách quan.")
-    validation_window=st.number_input("Xem sai số gần cường độ nhập: nửa độ rộng vùng (MPa)",min_value=0.,max_value=100.,value=10.,step=2.,
-                                      help="Ví dụ 120 ± 10 MPa: chỉ so sánh mẫu thực nghiệm đo từ 110 đến 130 MPa ở đúng tuổi nén đang chọn.")
     validation_upload=st.file_uploader("Tải CSV kiểm định thực nghiệm",type=["csv"],key="validation_csv")
     if validation_upload and model is not None:
         try:
@@ -378,19 +353,15 @@ with t3:
             st.plotly_chart(fig,use_container_width=True)
             near=res[np.isclose(res["Tuổi nén (ngày)"],age)]
             if len(near)>=3:
-                st.caption(f"Nhóm đúng tuổi {age} ngày: n={len(near)}, MAE={np.mean(np.abs(near['Sai số (MPa)'])):.2f} MPa. Kiểm định riêng vùng gần cường độ bạn nhập nằm bên dưới.")
-            region=validation_near_target(res,target,age,validation_window,target_tolerance)
-            st.markdown("#### Kiểm định riêng quanh cường độ bạn nhập")
-            if region is None:
-                st.warning(f"CSV chưa có mẫu đo thực nghiệm tại {age} ngày trong khoảng {target-validation_window:g}–{target+validation_window:g} MPa.")
-            else:
-                t1m,t2m,t3m,t4m=st.columns(4)
-                t1m.metric("Mẫu thực nghiệm cùng vùng",region["n"])
-                t2m.metric("MAE vùng (MPa)",f"{region['mae_mpa']:.2f}")
-                t3m.metric("RMSE vùng (MPa)",f"{region['rmse_mpa']:.2f}")
-                t4m.metric("Sai lệch TB có dấu",f"{region['bias_mpa']:+.2f} MPa")
-                st.caption(f"Trong {region['n']} mẫu đo ở {age} ngày gần {target:g} MPa: {region['within_tolerance_count']} mẫu có |AI − đo| ≤ {target_tolerance:g} MPa ({region['within_tolerance_percent']:.1f}%). Đây chỉ là thống kê trên CSV, không bảo đảm cấp phối mới chính xác trong dung sai.")
-                if region["n"] < 10:st.warning("Vùng mục tiêu có ít hơn 10 mẫu; thống kê rất kém ổn định.")
+                st.caption(f"Nhóm {age} ngày: n={len(near)}, MAE={np.mean(np.abs(near['Sai số (MPa)'])):.2f} MPa. Kiểm định riêng vùng ≥{target:g} MPa được khuyến nghị nếu đủ số mẫu.")
+            high=near[near["Đo thực nghiệm (MPa)"]>=target]
+            if len(high)>=3:
+                st.caption(f"Nhóm {age} ngày có cường độ thực nghiệm ≥{target:g} MPa: n={len(high)}, MAE={np.mean(np.abs(high['Sai số (MPa)'])):.2f} MPa.")
+            neighborhood=near[(near["Đo thực nghiệm (MPa)"]-target).abs()<=10]
+            if len(neighborhood)>=3:
+                st.caption(f"Kiểm định gần cường độ bạn nhập ({target:g} ± 10 MPa, {age} ngày): "
+                           f"n={len(neighborhood)}, MAE={np.mean(np.abs(neighborhood['Sai số (MPa)'])):.2f} MPa. "
+                           "Chỉ đáng tin khi CSV độc lập với tập đã huấn luyện.")
             st.download_button("⬇ Bảng sai số kiểm định",res.to_csv(index=False).encode("utf-8-sig"),"UHPC_kiem_dinh_sai_so.csv","text/csv")
         except Exception as exc:st.error("Không thể kiểm định CSV: "+str(exc))
     else:
@@ -431,15 +402,15 @@ with t5:
 
 **2. Tính đúng 15 đặc trưng:** tỷ lệ `Ty_le_W_B` theo notebook gốc bằng nước chia tổng năm thành phần bột (gồm cả bột thạch anh). Đây là W/P*, khác W/B truyền thống không tính bột thạch anh.
 
-**3. Thiết kế ngược:** tối ưu tiến hóa vi phân trong khoảng P5–P95 từng lượng vật liệu. Chế độ mặc định ưu tiên giảm độ lệch |AI − cường độ nhập|; trong chế độ “sát, không thấp hơn” phải thỏa thêm AI ∈ [mục tiêu + dự phòng, mục tiêu + dự phòng + dung sai]. Một nghiệm thỏa đại số vẫn có thể không đạt khi thí nghiệm.
+**3. Thiết kế ngược:** tối ưu tiến hóa vi phân trong khoảng P5–P95 từng lượng vật liệu, lọc tuổi và tổ hợp được chọn. Một nghiệm thỏa các ràng buộc đại số vẫn có thể không đạt khi thí nghiệm.
 
 **4. Kiểm soát ngoại suy:** khoảng cách KNN trên 15 đặc trưng được chuẩn hóa, mốc P95 tính trên khoảng cách điểm train tới hàng train khác gần nhất. **Không** diễn giải P95 là xác suất 95% cường độ đạt.
 
 **5. Vật liệu thực:** khối lượng riêng đang là đầu vào tham khảo; cần có phiếu vật liệu để hiệu chỉnh cát ẩm, nước tự do, độ linh động, đặc trưng sợi và độ hút nước. Mô hình không có biến rõ ràng mô tả đầy đủ chế độ dưỡng hộ, loại mẫu, độ chảy và nguồn cốt liệu.
 
-**6. Kiểm định:** CSV có cường độ đo giúp tính sai số toàn bộ và vùng gần mục tiêu (cùng tuổi, đo thực nghiệm trong khoảng nhập). Không tự chứng minh dữ liệu độc lập; rò rỉ theo nguồn bài báo vẫn có thể tồn tại.
+**6. Kiểm định:** số liệu CSV tải lên chỉ hỗ trợ kiểm tra sai số của tập được chọn, không tự kiểm tra độc lập hay trùng nguồn. Có thể rò rỉ dữ liệu nếu dùng các hàng từng huấn luyện để kiểm định.
 
-**7. Xuất kết quả:** CSV là bảng định lượng; JSON chứa sai lệch MPa, % và trạng thái khớp khoảng cường độ AI; **không phải chứng chỉ nghiệm thu** hay bằng chứng mẫu thực đạt mục tiêu.
+**7. Xuất kết quả:** CSV là bảng định lượng; JSON ghi dự đoán AI và điều kiện số học, **không phải chứng chỉ nghiệm thu** hay chứng minh UHPC đạt 120 MPa.
 """)
     st.markdown("**Đường dẫn dữ liệu phần mềm đang sử dụng**")
     st.code(f"MODEL: {MODEL_PATH.relative_to(ROOT)}\nTRAIN: {TRAIN_PATH.relative_to(ROOT)}",language="text")
@@ -449,4 +420,4 @@ with t5:
     st.caption("Phiên bản nâng cấp độc lập; chưa cập nhật trực tiếp GitHub và Streamlit của bạn. Mục đích: nghiên cứu cấp phối, không thay nghiệm thu vật liệu.")
 
 st.divider()
-st.caption("UHPC AI Studio 2.2 · Đề xuất bằng AI, không tạo số liệu giả · Kiểm chứng thí nghiệm bắt buộc trước áp dụng")
+st.caption("UHPC AI Studio 2.0 · Đề xuất bằng AI, không tạo số liệu giả · Kiểm chứng thí nghiệm bắt buộc trước áp dụng")

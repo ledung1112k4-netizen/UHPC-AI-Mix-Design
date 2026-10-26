@@ -264,64 +264,31 @@ def evaluate_validation(model, cols, val:pd.DataFrame, train:pd.DataFrame | None
     return metrics, results
 
 
-def strength_target_interval(target: float, mode="min_close", tolerance=0.01, margin=0.0):
-    """Accepted AI *point-prediction* band, not a physical strength confidence interval.
+def target_match(predicted, target, *, margin=0.0, tolerance=0.01):
+    """Compare AI *point prediction* with user's requested strength.
 
-    min_close: target+margin <= prediction <= target+margin+tolerance
-    band: target-tolerance <= prediction <= target+tolerance (may be below target)
-    minimum_only: prediction >= target+margin
+    This is matching a requested model output, NOT measuring prediction error
+    against a laboratory compressive-strength result.
     """
-    values=(target,tolerance,margin)
-    if not all(np.isfinite(float(v)) for v in values) or target <= 0 or tolerance < 0 or margin < 0:
-        raise AuditError("Mục tiêu, dung sai và biên dự phòng phải hợp lệ.")
-    if mode == "min_close":
-        return float(target+margin),float(target+margin+tolerance)
-    if mode == "band":
-        if target-tolerance < 0:
-            raise AuditError("Dung sai ± phải nhỏ hơn hoặc bằng cường độ mục tiêu.")
-        return float(target-tolerance),float(target+tolerance)
-    if mode == "minimum_only":
-        return float(target+margin),float("inf")
-    raise AuditError("Chế độ bám sát cường độ không hợp lệ.")
-
-
-def strength_alignment(prediction, target, *, mode="min_close", tolerance=0.01, margin=0.0):
-    """Report prediction-vs-command only: not model accuracy vs lab observation."""
-    low,high=strength_target_interval(target,mode,tolerance,margin)
-    if not np.isfinite(prediction):
-        raise AuditError("Cường độ AI dự đoán không hợp lệ.")
-    delta=float(prediction-target)
+    vals=(predicted,target,margin,tolerance)
+    if not all(np.isfinite(float(x)) for x in vals) or target <= 0 or margin < 0 or tolerance < 0:
+        raise AuditError("Cường độ mục tiêu, dự báo hoặc dung sai không hợp lệ.")
+    delta=float(predicted-target)
+    lower=float(target+margin)
+    upper=float(lower+tolerance)
     return {
-        "target_mpa":float(target),"predicted_mpa":float(prediction),
-        "delta_mpa":delta,"absolute_delta_mpa":abs(delta),
-        "absolute_delta_percent":abs(delta)/float(target)*100,
-        "same_to_2_decimals": bool(round(float(prediction),2)==round(float(target),2)),
-        "exact_numeric_match":bool(abs(delta)<=1e-10),
-        "lower_mpa":low,"upper_mpa":high if np.isfinite(high) else None,
-        "meets_policy":bool(low-1e-8<=prediction<=high+1e-8),
-        "meets_minimum":bool(prediction+1e-8>=target),
-        "mode":mode,"tolerance_mpa":float(tolerance),"margin_mpa":float(margin),
+        "target_mpa":float(target),
+        "predicted_mpa":float(predicted),
+        "delta_mpa":delta,
+        "absolute_delta_mpa":abs(delta),
+        "absolute_delta_percent":abs(delta)/float(target)*100.,
+        "minimum_required_mpa":lower,
+        "maximum_near_mpa":upper,
+        "tolerance_mpa":float(tolerance),
+        "meets_minimum":bool(predicted+1e-8>=lower),
+        "near_from_above":bool(lower-1e-8<=predicted<=upper+1e-8),
+        "measured_in_lab":False,
     }
-
-
-def validation_near_target(results:pd.DataFrame,target:float,age:float,window:float=10.0, tolerance:float=2.0):
-    """Real-label validation restricted by measured strength and specified age.
-
-    Merely a descriptive slice of uploaded data, never an individual prediction bound.
-    """
-    if not all(np.isfinite(float(x)) for x in (target,age,window,tolerance)) or target <= 0 or age <= 0 or window < 0 or tolerance < 0:
-        raise AuditError("Thông số vùng kiểm định không hợp lệ.")
-    measured=results["Đo thực nghiệm (MPa)"].astype(float).to_numpy()
-    yhat=results["AI dự báo (MPa)"].astype(float).to_numpy()
-    ages=results["Tuổi nén (ngày)"].astype(float).to_numpy()
-    good=np.isfinite(measured)&np.isfinite(yhat)&np.isfinite(ages)&np.isclose(ages,age)&(np.abs(measured-target)<=window+1e-9)
-    actual,predicted=measured[good],yhat[good]
-    if len(actual)==0:return None
-    diff=predicted-actual
-    return {"n":int(len(actual)),"mae_mpa":float(np.mean(np.abs(diff))),"rmse_mpa":float(np.sqrt(np.mean(diff**2))),
-            "bias_mpa":float(np.mean(diff)),"within_tolerance_count":int(np.sum(np.abs(diff)<=tolerance+1e-8)),
-            "within_tolerance_percent":float(np.mean(np.abs(diff)<=tolerance+1e-8)*100),
-            "target_mpa":float(target),"age_days":float(age),"window_mpa":float(window),"tolerance_mpa":float(tolerance)}
 
 
 def request_id(payload):
@@ -332,18 +299,18 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
              air=.02, volume_tol=.02, steel_limit_percent=2.0, require_fa=True,
              require_ggbfs=True, require_quartz=False, cement_max=1000,
              min_present_kg=5., margin=0., use_distance=True, objective_mode="cement",
-             target_mode="min_close", target_tolerance=0.01,
-             prices=None, seed=42,maxiter=38,popsize=7):
+             prices=None, seed=42,maxiter=38,popsize=7, target_tolerance=0.01):
     """Numerical search; valid numerical candidate != experimentally verified UHPC.
 
     DE searches inside per-material training quantile ranges, and chooses only
     candidates passing every final constraint. Returns infeasible status if none.
     """
+    if objective_mode not in ("cement", "cost", "near_target"):
+        raise AuditError("Chế độ tối ưu không hợp lệ.")
+    if not np.isfinite(target_tolerance) or target_tolerance < 0:
+        raise AuditError("Dung sai bám sát cường độ không hợp lệ.")
     if not wb_min>0 or not wb_max>=wb_min or cement_max<=0:
         raise AuditError("Giới hạn thiết kế không hợp lệ.")
-    target_lower,target_upper=strength_target_interval(target,target_mode,target_tolerance,margin)
-    if objective_mode not in ("cement","cost","near_target"):
-        raise AuditError("Mục tiêu tối ưu không hợp lệ.")
     sub=train[np.isclose(train["Tuoi_duong_ho"],age)]
     if sub.empty:
         raise AuditError("Không có dữ liệu ở đúng tuổi nén được chọn; không tối ưu ngoại suy tuổi.")
@@ -391,14 +358,14 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     train_hi=train[FEATURES_15].max().to_numpy(dtype=float)
     den=np.asarray([densities[k] for k in MATERIALS],dtype=float)
     if not np.isfinite(den).all() or (den<=0).any():raise AuditError("Khối lượng riêng không hợp lệ.")
-    # Three candidate tiers: passes everything; passes safety/physics but misses
-    # strength target; lowest objective (may violate physical constraints).
-    # A missing exact match never authorizes fabricating an exact prediction.
     best = {"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
     best_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
+    best_above_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
     best_raw={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
-    eval_count=[0]
+    search_lo=np.array([b[0] for b in limits],dtype=float)
+    search_hi=np.array([b[1] for b in limits],dtype=float)
     source=["Tối ưu số"]
+    eval_count=[0]
     def expand(a):
         z=np.asarray(a,dtype=float)
         if z.ndim==1:z=z.reshape(-1,1)
@@ -416,13 +383,10 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         binder=samples[:,[MATERIALS.index(k) for k in BINDER]].sum(axis=1)
         wb=samples[:,MATERIALS.index("Nuoc")]/np.maximum(1e-9,binder)
         steel=100*samples[:,MATERIALS.index("Soi_thep")]/den[MATERIALS.index("Soi_thep")]
-        shortfall=np.maximum(target_lower-predicted,0)
-        overrun=np.maximum(predicted-target_upper,0)
-        # Reject both under-strength AND overshooting the selected strength band.
-        # Linear + quadratic terms discourage near-boundary violations.
-        strength_violation=shortfall+overrun
-        penalty=2e5*strength_violation+1e6*strength_violation**2
-        penalty+=1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
+        shortage=np.maximum(target+margin-predicted,0)
+        overrun=(np.maximum(predicted-(target+margin+target_tolerance),0)
+                 if objective_mode=="near_target" else np.zeros(n,dtype=float))
+        penalty=1e5*(shortage**2+overrun**2) + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
         penalty+=1e7*np.maximum(np.abs(volume-(1-air))-volume_tol,0)**2
         penalty+=1e5*np.maximum(steel-steel_limit_percent,0)**2
         farr=f.loc[:,FEATURES_15].to_numpy(dtype=float)
@@ -446,24 +410,25 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             # Fixed normalizer: optimization objective must NOT depend on current population.
             raw=raw/baseline_cost * 500
         elif objective_mode=="near_target":
-            # Predicted strength deviation dominates cement minimization by design.
-            # Material saving is only a small tie-breaker, not a second main goal.
-            raw=np.abs(predicted-target)*1000 + samples[:,0]*.0001
+            # Sai lệch cường độ là tiêu chí chính. Không cộng trọng số xi măng
+            # khiến cấp phối xa 120 MPa hơn thắng một cấp phối sát 120 MPa.
+            raw=np.abs(predicted-(target+margin))
         else: raw=samples[:,0]+samples[:,MATERIALS.index("Soi_thep")]*.25
         loss=raw+penalty
-        # Explicitly require every suggested candidate to remain inside the
-        # numerical search bounds, including when evaluating actual training rows.
-        search_lo=np.array([b[0] for b in limits])
-        search_hi=np.array([b[1] for b in limits])
+        # DE stays in bounds, but the training rows used as seed below might not.
         inside_search=((samples>=search_lo-1e-8)&(samples<=search_hi+1e-8)).all(axis=1)
-        required_materials=(
-            (samples[:,MATERIALS.index("Tro_bay")]>=min_present_kg-1e-8 if require_fa else np.ones(n,dtype=bool))
-            & (samples[:,MATERIALS.index("Xil_lo_cao")]>=min_present_kg-1e-8 if require_ggbfs else np.ones(n,dtype=bool))
-            & (samples[:,MATERIALS.index("Bot_thach_anh")]>=min_present_kg-1e-8 if require_quartz else np.ones(n,dtype=bool))
+        required=(
+            (samples[:,MATERIALS.index("Tro_bay")]>=min_present_kg-1e-8 if require_fa else np.ones(n,bool)) &
+            (samples[:,MATERIALS.index("Xil_lo_cao")]>=min_present_kg-1e-8 if require_ggbfs else np.ones(n,bool)) &
+            (samples[:,MATERIALS.index("Bot_thach_anh")]>=min_present_kg-1e-8 if require_quartz else np.ones(n,bool))
         )
-        safe=inside_search & required_materials & (wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&(np.abs(volume-(1-air))<=volume_tol+1e-8)&(steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1)
-        if use_distance:safe &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
-        valid=safe & (shortfall<=1e-8) & (overrun<=1e-8)
+        safe=(inside_search & required &
+              (wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&
+              (np.abs(volume-(1-air))<=volume_tol+1e-8)&
+              (steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1))
+        if use_distance:
+            safe &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
+        valid=safe&(shortage<=1e-8)&(overrun<=1e-8)
         if valid.any():
             inds=np.flatnonzero(valid)
             k=inds[np.argmin(raw[inds])]
@@ -471,49 +436,57 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
                 best.update(loss=float(raw[k]),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
         if safe.any():
             inds=np.flatnonzero(safe)
-            # Even if no sample meets a very tight requested tolerance,
-            # return the closest physically admissible prediction as a
-            # *failed* candidate, not an unsafe low-penalty proposal.
-            near_score=np.abs(predicted[inds]-target)+samples[inds,0]*1e-8
-            k=inds[np.argmin(near_score)]
-            score=float(near_score[np.argmin(near_score)])
-            if score<best_safe["loss"]:
-                best_safe.update(loss=score,mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
+            # If no target match is found, return the nearest *physically safe*
+            # prediction and explicitly mark strength mismatch as a failure.
+            score=np.abs(predicted[inds]-(target+margin))
+            if objective_mode!="near_target":
+                score=np.maximum(target+margin-predicted[inds],0)+np.maximum(predicted[inds]-(target+margin),0)
+            k=inds[np.argmin(score)]
+            if float(score.min())<best_safe["loss"]:
+                best_safe.update(loss=float(score.min()),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
+            if objective_mode=="near_target":
+                above=inds[predicted[inds]>=target+margin-1e-8]
+                if len(above):
+                    k_above=above[np.argmin(predicted[above]-(target+margin))]
+                    diff=float(predicted[k_above]-(target+margin))
+                    if diff<best_above_safe["loss"]:
+                        best_above_safe.update(loss=diff,mix=samples[k_above].copy(),prediction=float(predicted[k_above]),distance=float(dist[k_above]),origin=source[0])
         j=int(np.argmin(loss))
         if loss[j]<best_raw["loss"]:
             best_raw.update(loss=float(loss[j]),mix=samples[j].copy(),prediction=float(predicted[j]),distance=float(dist[j]),origin=source[0])
         eval_count[0]+=n
         return loss
-    # Check existing rows at the selected age as candidate starting points.
-    # They do NOT carry a measured strength label here; all outputs are
-    # re-predicted by the loaded model and subjected to the same checks.
-    prior=sub.loc[:,MATERIALS].drop_duplicates().reset_index(drop=True)
-    if len(prior)>1000:
-        prior=prior.sample(n=1000,random_state=int(seed)).reset_index(drop=True)
-    source[0]="Dòng dữ liệu huấn luyện (dự báo lại)"
-    for start in range(0,len(prior),250):
-        chunk=prior.iloc[start:start+250].to_numpy(dtype=float)
-        objective(chunk[:,free].T)
-    source[0]="Tối ưu số"
+    if objective_mode=="near_target":
+        # Recheck existing mixtures as model-predicted candidates; the training
+        # feature file does not establish their measured strengths.
+        rows=sub.loc[:,MATERIALS].drop_duplicates()
+        if len(rows)>1000:rows=rows.sample(n=1000,random_state=int(seed))
+        source[0]="Hàng train (AI dự báo lại)"
+        for start in range(0,len(rows),250):
+            block=rows.iloc[start:start+250].to_numpy(dtype=float)
+            objective(block[:,free].T)
+        source[0]="Tối ưu số"
     de = differential_evolution(objective,[limits[i] for i in free],seed=int(seed),maxiter=int(maxiter),popsize=int(popsize),tol=.01,polish=False,vectorized=True,updating="deferred")
-    chosen=best if best["mix"] is not None else (best_safe if best_safe["mix"] is not None else best_raw)
+    chosen=(best if best["mix"] is not None else
+            best_above_safe if best_above_safe["mix"] is not None else
+            best_safe if best_safe["mix"] is not None else best_raw)
     if chosen["mix"] is None:raise AuditError("Bộ giải không đánh giá được ứng viên nào.")
     mix=dict(zip(MATERIALS,map(float,chosen["mix"])))
     pred=predict(model,cols,mix,age,fixed)
-    phys, checks=verify_design(mix,densities,wb_min=wb_min,wb_max=wb_max,air=air,volume_tol=volume_tol,steel_limit_percent=steel_limit_percent,require_fa=require_fa,require_ggbfs=require_ggbfs,require_quartz=require_quartz,cement_max=cement_max,target=None)
-    alignment=strength_alignment(pred,target,mode=target_mode,tolerance=target_tolerance,margin=margin)
-    checks["Đáp ứng khoảng cường độ AI đã chọn"]=alignment["meets_policy"]
-    if target_mode in ("min_close","minimum_only"):
-        # Retain the original diagnostic for older consumers and test runners.
-        checks["Dự đoán AI ≥ mục tiêu + dự phòng"] = alignment["predicted_mpa"] + 1e-8 >= target + margin
+    phys, checks=verify_design(mix,densities,wb_min=wb_min,wb_max=wb_max,air=air,volume_tol=volume_tol,steel_limit_percent=steel_limit_percent,require_fa=require_fa,require_ggbfs=require_ggbfs,require_quartz=require_quartz,cement_max=cement_max,target=target,predicted=pred,margin=margin)
     x_final=feature_frame(pd.DataFrame([mix]),age,fixed,cols)
     prox=distance_check(x_final,train,ref)
     group_prox=distance_check(x_final,sub,group_ref)
+    alignment=target_match(pred,target,margin=margin,tolerance=target_tolerance)
+    if objective_mode=="near_target":
+        checks[f"Cường độ AI sát mục tiêu (0–{target_tolerance:g} MPa phía trên)"]=alignment["near_from_above"]
     checks["Trong min–max từng đặc trưng train"]=not bool(prox.outside_features)
     if use_distance:
         checks["Gần dữ liệu train toàn tập (P95 NN)"]=prox.close
         checks["Gần train cùng tuổi/tổ hợp (P95 NN)"]=group_prox.close
     return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(de.success),"evaluations":eval_count[0],"training_matches":len(sub),"iterations":int(de.nit),"mode":objective_mode,
-            "target_mode":target_mode,"target_tolerance":float(target_tolerance),"alignment":alignment,
-            "candidate_origin":chosen["origin"],"candidate_tier":("in_target" if best["mix"] is not None else "safe_outside_target" if best_safe["mix"] is not None else "no_safe_candidate"),
-            "match_is_model_prediction_only":True}
+            "alignment":alignment,"candidate_origin":chosen["origin"],
+            "candidate_tier":("target_match" if best["mix"] is not None else
+                              "safe_above_not_matching" if best_above_safe["mix"] is not None else
+                              "safe_but_not_matching" if best_safe["mix"] is not None else
+                              "no_physically_safe_candidate")}
