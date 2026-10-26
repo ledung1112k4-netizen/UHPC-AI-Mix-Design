@@ -30,14 +30,343 @@ TRAINING_PATHS = [ROOT / "assets" / "training_features.csv", ROOT / "training_fe
 st.set_page_config(page_title="UHPC Studio | Thiết kế cấp phối AI", page_icon="🧪", layout="wide")
 st.markdown("""
 <style>
-.block-container {padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1280px}
-.hero {background: linear-gradient(110deg,#133b39,#176e63); border-radius:16px;
- padding:26px 30px; color:white; margin-bottom:20px}
-.hero small {letter-spacing:.15em; color:#bbebe3; font-weight:700}
-.hero h1 {font-weight:750; margin:6px 0 8px; font-size:2.15rem; color:white}
-.hero p {font-size:1.02rem; max-width:850px; color:#ebf9f7; margin-bottom:0}
-.stButton>button[kind="primary"] {font-weight:700; border-radius:9px}
-[data-testid="stMetric"] {background:#eef5f4; padding:16px; border-radius:12px}
+/* ========================================================================
+   UHPC STUDIO  |  PROFESSIONAL DARK DASHBOARD
+   Chỉ tác động giao diện. Không can thiệp vào mô hình, dữ liệu, kết quả tính.
+   ======================================================================== */
+
+:root {
+  color-scheme: dark;
+  --uhpc-bg: #07101e;
+  --uhpc-sidebar: #0b182b;
+  --uhpc-surface: #102238;
+  --uhpc-surface-hover: #152b45;
+  --uhpc-border: #29405c;
+  --uhpc-text: #f8fafc;
+  --uhpc-muted: #cbd5e1;
+  --uhpc-accent: #2dd4bf;
+  --uhpc-accent-dark: #0f766e;
+  --uhpc-card: #f3f7fb;
+  --uhpc-card-label: #334155;
+  --uhpc-card-number: #0b1d36;
+}
+
+/* Font có sẵn trên hệ điều hành; không tải font từ bên ngoài. */
+html, body, [data-testid="stApp"], [data-testid="stAppViewContainer"] {
+  font-family: "Inter", "Segoe UI", "Roboto", "Arial", sans-serif !important;
+  background-color: var(--uhpc-bg) !important;
+  color: var(--uhpc-text) !important;
+}
+
+[data-testid="stAppViewContainer"] > .main {
+  background: var(--uhpc-bg) !important;
+}
+
+[data-testid="stHeader"] {
+  background: rgba(7, 16, 30, 0.92) !important;
+  backdrop-filter: blur(10px);
+}
+
+[data-testid="stMain"] .block-container,
+.main .block-container {
+  max-width: 1320px !important;
+  padding-top: 1.6rem !important;
+  padding-bottom: 3.2rem !important;
+}
+
+/* Các đoạn văn, tiêu đề và ghi chú trên nền tối. */
+[data-testid="stMain"] h1,
+[data-testid="stMain"] h2,
+[data-testid="stMain"] h3,
+[data-testid="stMain"] h4,
+[data-testid="stMain"] h5,
+.main h1, .main h2, .main h3, .main h4 {
+  color: #ffffff !important;
+  font-family: inherit !important;
+  font-weight: 750 !important;
+  letter-spacing: -0.025em;
+}
+
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] li,
+.main [data-testid="stMarkdownContainer"] p,
+.main [data-testid="stMarkdownContainer"] li {
+  color: #e2e8f0 !important;
+  line-height: 1.65 !important;
+}
+
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] *,
+[data-testid="stMain"] small,
+.main small {
+  color: var(--uhpc-muted) !important;
+  line-height: 1.55;
+}
+
+/* Hero đầu trang: điểm nhấn xanh ngọc, tiêu đề trắng. */
+.hero {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(117deg, #103551 0%, #11455a 48%, #0e6c69 100%) !important;
+  border: 1px solid #266d77;
+  border-radius: 20px;
+  padding: 29px 34px;
+  margin-bottom: 23px;
+  box-shadow: 0 14px 35px rgba(0, 0, 0, .2);
+}
+.hero::before {
+  content: "";
+  position: absolute;
+  right: -115px;
+  top: -125px;
+  width: 290px;
+  height: 290px;
+  border-radius: 50%;
+  border: 65px solid rgba(93, 234, 216, 0.07);
+  pointer-events: none;
+}
+.hero small {
+  display: block;
+  position: relative;
+  color: #a6fff0 !important;
+  font-size: .78rem;
+  font-weight: 800;
+  letter-spacing: .14em;
+}
+.hero h1 {
+  position: relative;
+  margin: 8px 0 11px;
+  font-size: clamp(1.6rem, 3.0vw, 2.4rem);
+  line-height: 1.16;
+  font-weight: 800 !important;
+  color: #ffffff !important;
+}
+.hero p {
+  position: relative;
+  max-width: 920px;
+  margin: 0;
+  color: #eafaf8 !important;
+  font-size: 1.02rem;
+  font-weight: 450;
+  line-height: 1.65;
+}
+
+/* Sidebar riêng với màu nền thống nhất. */
+[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div:first-child {
+  background: var(--uhpc-sidebar) !important;
+  border-right: 1px solid #213651 !important;
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+  color: #f8fafc !important;
+}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] * {
+  color: #bacbdd !important;
+}
+
+/* Thẻ KPI là phần quan trọng nhất: nền sáng, chữ/số thật tối. */
+[data-testid="stMetric"],
+.metric-card {
+  background: var(--uhpc-card) !important;
+  border: 1px solid #d4e0ec !important;
+  border-radius: 16px !important;
+  box-shadow: 0 7px 18px rgba(0, 0, 0, .13) !important;
+  padding: 19px 21px !important;
+  min-height: 123px;
+  color: var(--uhpc-card-number) !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricLabel"],
+[data-testid="stMetric"] [data-testid="stMetricLabel"] *,
+[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricLabel"] *,
+.main [data-testid="stMetric"] [data-testid="stMetricLabel"] *,
+.metric-card .metric-label {
+  color: var(--uhpc-card-label) !important;
+  -webkit-text-fill-color: var(--uhpc-card-label) !important;
+  opacity: 1 !important;
+  font-size: 0.96rem !important;
+  line-height: 1.45 !important;
+  font-weight: 720 !important;
+}
+[data-testid="stMetric"] [data-testid="stMetricValue"],
+[data-testid="stMetric"] [data-testid="stMetricValue"] *,
+[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricValue"] *,
+.main [data-testid="stMetric"] [data-testid="stMetricValue"] *,
+.metric-card .metric-value {
+  color: var(--uhpc-card-number) !important;
+  -webkit-text-fill-color: var(--uhpc-card-number) !important;
+  opacity: 1 !important;
+  font-size: clamp(1.55rem, 2.45vw, 2.22rem) !important;
+  font-weight: 820 !important;
+  line-height: 1.3 !important;
+  letter-spacing: -.028em;
+  font-variant-numeric: tabular-nums;
+}
+[data-testid="stMetric"] [data-testid="stMetricDelta"],
+[data-testid="stMetric"] [data-testid="stMetricDelta"] * {
+  font-weight: 750 !important;
+}
+.metric-card .metric-sub {
+  color: #334155 !important;
+  font-size: .9rem;
+  font-weight: 570;
+}
+
+/* Tab dễ phân biệt, ngay cả khi người dùng chuyển mục. */
+[data-baseweb="tab-list"] {
+  background: #0c1d32 !important;
+  border: 1px solid var(--uhpc-border);
+  border-radius: 13px;
+  padding: 5px;
+  gap: 5px;
+}
+button[data-baseweb="tab"] {
+  color: #d2dfed !important;
+  background: transparent !important;
+  border-radius: 10px !important;
+  font-weight: 650 !important;
+  padding: .65rem .85rem !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+  color: #ffffff !important;
+  background: #174c56 !important;
+  box-shadow: inset 0 -2px 0 var(--uhpc-accent);
+}
+[data-baseweb="tab-highlight"] { background: var(--uhpc-accent) !important; }
+[data-baseweb="tab-border"] { background: transparent !important; }
+
+/* Nhãn trường, điều khiển và mẫu nhập trên nền tối. */
+[data-testid="stWidgetLabel"] *,
+[data-testid="stRadio"] label,
+[data-testid="stCheckbox"] label,
+[data-testid="stToggle"] label,
+[data-testid="stForm"] label {
+  color: #f1f5f9 !important;
+  opacity: 1 !important;
+  font-weight: 600 !important;
+}
+[data-baseweb="input"] > div,
+[data-baseweb="select"] > div,
+[data-baseweb="textarea"] > div {
+  background-color: #13263d !important;
+  border-color: #3c5876 !important;
+  color: #ffffff !important;
+  border-radius: 9px !important;
+}
+[data-baseweb="input"] input,
+[data-baseweb="select"] input,
+[data-baseweb="textarea"] textarea,
+[data-baseweb="select"] span,
+[data-baseweb="select"] [role="combobox"] {
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  caret-color: #ffffff !important;
+}
+[data-baseweb="input"] input::placeholder,
+[data-baseweb="textarea"] textarea::placeholder {
+  color: #a7bad0 !important;
+  -webkit-text-fill-color: #a7bad0 !important;
+}
+[data-baseweb="input"] svg,
+[data-baseweb="select"] svg { fill: #dbeafe !important; }
+[data-testid="stForm"] {
+  border: 1px solid var(--uhpc-border) !important;
+  background: #0c1a2c !important;
+  border-radius: 16px !important;
+  padding: 1.2rem !important;
+}
+
+/* Danh sách select mở ra trên lớp nổi vẫn có nền tối và chữ sáng. */
+[data-baseweb="popover"] [role="listbox"],
+[data-baseweb="popover"] [role="option"],
+[role="listbox"], [role="option"] {
+  background-color: #13263d !important;
+  color: #f8fafc !important;
+}
+[role="option"][aria-selected="true"] {
+  background-color: #20516a !important;
+}
+
+/* Các nút có tương phản cao. */
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"] {
+  background: linear-gradient(110deg, #0d9488, #0f766e) !important;
+  border: 1px solid #30d9c4 !important;
+  border-radius: 10px !important;
+  color: #ffffff !important;
+  font-weight: 760 !important;
+  min-height: 45px;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, .16);
+}
+.stButton > button[kind="primary"] *,
+.stFormSubmitButton > button[kind="primary"] * { color: #ffffff !important; }
+.stButton > button:not([kind="primary"]),
+.stDownloadButton > button {
+  background: #15304a !important;
+  border: 1px solid #476583 !important;
+  color: #f8fafc !important;
+  border-radius: 10px !important;
+  font-weight: 650 !important;
+}
+.stButton > button:not([kind="primary"]):hover,
+.stDownloadButton > button:hover { background: #1d415e !important; }
+.stButton > button:disabled,
+.stFormSubmitButton > button:disabled { opacity: .58 !important; }
+
+/* Expanders, bảng kết quả và đường kẻ phân khu. */
+[data-testid="stExpander"] {
+  background: #0d1f33 !important;
+  border: 1px solid var(--uhpc-border) !important;
+  border-radius: 12px !important;
+}
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary * {
+  color: #e8f1fc !important;
+  font-weight: 650 !important;
+}
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+  border: 1px solid #29405c;
+  border-radius: 12px;
+  overflow: hidden;
+}
+hr { border-color: #2b425d !important; }
+[data-testid="stCodeBlock"] { border-radius: 12px; overflow: hidden; }
+
+/* Các cảnh báo vẫn mang ý nghĩa Streamlit nhưng không bị chữ mờ. */
+[data-testid="stAlert"] {
+  background: #102941 !important;
+  border: 1px solid #376080 !important;
+  border-radius: 12px !important;
+}
+[data-testid="stAlert"] *,
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p {
+  color: #f1f5f9 !important;
+  -webkit-text-fill-color: #f1f5f9 !important;
+  opacity: 1 !important;
+}
+[data-testid="stAlert"] strong { color: #ffffff !important; }
+
+/* Khả năng đọc trên laptop và điện thoại. */
+@media (max-width: 760px) {
+  [data-testid="stMain"] .block-container, .main .block-container {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+    padding-top: 1rem !important;
+  }
+  .hero { padding: 22px 19px; border-radius: 15px; }
+  .hero h1 { font-size: 1.75rem; }
+  [data-testid="stMetric"] {
+    min-height: 112px;
+    padding: 15px 17px !important;
+  }
+  [data-testid="stMetric"] [data-testid="stMetricValue"],
+  [data-testid="stMetric"] [data-testid="stMetricValue"] * {
+    font-size: 1.8rem !important;
+  }
+  [data-baseweb="tab-list"] { flex-wrap: wrap; }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -609,26 +938,3 @@ with tab_method:
                                    for k, v in training_bounds.items()]), use_container_width=True, hide_index=True)
     st.warning("Không có bảo đảm đạt cường độ thực tế ≥120 MPa. Dải giới hạn vật liệu là dải từ dữ liệu huấn luyện, không phải giới hạn tiêu chuẩn UHPC. Kết quả cần kiểm nghiệm độc lập.")
     st.markdown("**Thiếu dữ liệu thí nghiệm đặc thù:** tình trạng dưỡng hộ, tính công tác, đặc điểm sợi và nguồn cốt liệu có thể khác giữa các tài liệu. Không dùng ứng dụng này làm hồ sơ thiết kế cấp phối được phê duyệt khi chưa hiệu chuẩn và thí nghiệm.")
-/* Card số liệu */
-[data-testid="stMetric"],
-.metric-card {
-    background-color: #EEF2F5 !important;
-    border: 1px solid #CBD5E1 !important;
-    border-radius: 16px !important;
-}
-
-/* Tên chỉ số */
-[data-testid="stMetricLabel"] *,
-.metric-card .metric-label {
-    color: #334155 !important;
-    font-size: 16px !important;
-    font-weight: 700 !important;
-}
-
-/* Giá trị số */
-[data-testid="stMetricValue"] *,
-.metric-card .metric-value {
-    color: #0F172A !important;
-    font-size: 36px !important;
-    font-weight: 800 !important;
-}
