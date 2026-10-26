@@ -610,16 +610,19 @@ with tab_method:
     st.warning("Không có bảo đảm đạt cường độ thực tế ≥120 MPa. Dải giới hạn vật liệu là dải từ dữ liệu huấn luyện, không phải giới hạn tiêu chuẩn UHPC. Kết quả cần kiểm nghiệm độc lập.")
     st.markdown("**Thiếu dữ liệu thí nghiệm đặc thù:** tình trạng dưỡng hộ, tính công tác, đặc điểm sợi và nguồn cốt liệu có thể khác giữa các tài liệu. Không dùng ứng dụng này làm hồ sơ thiết kế cấp phối được phê duyệt khi chưa hiệu chuẩn và thí nghiệm.")
 st.markdown("""
+st.markdown("""
 <style>
 :root{
     --bg-main: #020817;
-    --text-main: #F8FAFC;
+    --text-main: #FFFFFF;
+    --text-body: #E2E8F0;
     --text-muted: #CBD5E1;
 
-    --card-bg: #F8FAFC;
-    --card-title: #64748B;
+    --card-bg: #F1F5F9;
+    --card-border: #CBD5E1;
+    --card-label: #475569;
     --card-value: #0F172A;
-    --card-sub: #334155;
+    --card-sub: #1E293B;
 
     --success-bg: #14532D;
     --success-text: #DCFCE7;
@@ -628,21 +631,21 @@ st.markdown("""
     --info-text: #DBEAFE;
 }
 
-/* Nền tổng */
+/* Nền app */
 html, body, [data-testid="stAppViewContainer"] {
     background: var(--bg-main);
     color: var(--text-main);
 }
 
-/* Tiêu đề section */
+/* Tiêu đề lớn */
 h1, h2, h3, h4 {
-    color: var(--text-main) !important;
-    font-weight: 700 !important;
+    color: #FFFFFF !important;
+    font-weight: 800 !important;
 }
 
-/* Chữ mô tả */
-p, li, span, label, div {
-    color: var(--text-main);
+/* Chữ đoạn văn */
+p, li, label, span, div {
+    color: var(--text-body);
 }
 
 /* Chữ phụ */
@@ -653,30 +656,33 @@ p, li, span, label, div {
 /* Card số liệu */
 .metric-card {
     background: var(--card-bg) !important;
+    border: 1px solid var(--card-border);
     border-radius: 18px;
-    padding: 22px 20px;
-    box-shadow: 0 4px 18px rgba(0,0,0,0.18);
-    border: 1px solid rgba(15, 23, 42, 0.06);
+    padding: 24px 20px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
 }
 
+/* Nhãn trong card */
 .metric-card .metric-label {
-    color: var(--card-title) !important;
-    font-size: 15px;
-    font-weight: 600;
-    margin-bottom: 10px;
+    color: var(--card-label) !important;
+    font-size: 16px;
+    font-weight: 700;
+    margin-bottom: 14px;
 }
 
+/* Số chính */
 .metric-card .metric-value {
     color: var(--card-value) !important;
-    font-size: 34px;
+    font-size: 38px;
     font-weight: 800;
     line-height: 1.15;
 }
 
+/* Ghi chú trong card */
 .metric-card .metric-sub {
     color: var(--card-sub) !important;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 15px;
+    font-weight: 600;
     margin-top: 6px;
 }
 
@@ -686,7 +692,7 @@ p, li, span, label, div {
     color: var(--success-text) !important;
     border-radius: 14px;
     padding: 16px 18px;
-    font-size: 16px;
+    font-size: 17px;
     font-weight: 700;
 }
 
@@ -700,17 +706,17 @@ p, li, span, label, div {
     font-weight: 600;
 }
 
-/* Nội dung markdown phụ trên nền tối */
+/* Nội dung markdown */
 [data-testid="stMarkdownContainer"] p {
-    color: var(--text-muted);
+    color: var(--text-body) !important;
     font-size: 16px;
+    line-height: 1.6;
 }
 
-/* Làm nổi số */
-.big-number {
-    color: #0F172A !important;
+/* Các số nổi bật trong câu */
+.highlight-number {
+    color: #FFFFFF !important;
     font-weight: 800 !important;
-    letter-spacing: 0.2px;
 }
 </style>
 """, unsafe_allow_html=True)
