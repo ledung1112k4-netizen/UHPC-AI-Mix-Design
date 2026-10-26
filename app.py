@@ -122,8 +122,7 @@ st.markdown("""
 <div class="hero">
 <small>UHPC STUDIO • AI-ASSISTED MIX DESIGN</small>
 <h1>Thiết kế cấp phối bê tông UHPC</h1>
-<p>Dự đoán cường độ nén và đề xuất cấp phối có tro bay &amp; xỉ lò cao,
-lựa chọn tổ hợp chất liên kết linh hoạt, ưu tiên 120 MPa tại 28 ngày. Không cần mở Google Colab sau khi triển khai.</p>
+<p>Dự đoán cường độ nén và đề xuất cấp phối có tro bay &amp; xỉ lò cao.</p>
 </div>
 """, unsafe_allow_html=True)
 
