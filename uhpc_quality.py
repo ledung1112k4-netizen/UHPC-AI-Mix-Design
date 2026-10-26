@@ -174,6 +174,41 @@ def load_training(path):
     return df.reset_index(drop=True)
 
 
+
+def reference_prediction_range(model, cols, train: pd.DataFrame, age: float) -> dict[str, float | int] | None:
+    """Descriptive range of ACTUAL model predictions for observed train rows at one age.
+
+    It is *not* a mathematical maximum of the regressor, nor a strength
+    guarantee. No target strengths or synthetic mixes are generated here.
+    """
+    if not np.isfinite(age) or age <= 0:
+        raise AuditError("Tuổi nén phải lớn hơn 0.")
+    missing = set(cols) - set(train.columns)
+    if missing:
+        raise AuditError("Thiếu cột dữ liệu tham chiếu: " + ", ".join(sorted(missing)))
+    subset = train.loc[np.isclose(pd.to_numeric(train["Tuoi_duong_ho"], errors="coerce"), age), cols]
+    if subset.empty:
+        return None
+    # Reuse the model features EXACTLY as stored in the training file (not
+    # synthesized recipes); deduplicate to prevent duplicate rows dominating n.
+    features = subset.apply(pd.to_numeric, errors="coerce")
+    features = features.replace([np.inf, -np.inf], np.nan).dropna().drop_duplicates()
+    if features.empty:
+        return None
+    strengths = []
+    for start in range(0, len(features), 512):
+        block = features.iloc[start:start+512]
+        yp = np.asarray(model.predict(block), dtype=float).reshape(-1)
+        if len(yp) != len(block) or not np.isfinite(yp).all():
+            raise AuditError("Mô hình không dự báo được dải cường độ tham chiếu tại tuổi đã chọn.")
+        strengths.extend(yp.tolist())
+    arr = np.asarray(strengths, dtype=float)
+    return {"age_days": float(age), "reference_count": int(len(features)),
+            "reference_predicted_min_mpa": float(arr.min()),
+            "reference_predicted_max_mpa": float(arr.max()),
+            "not_theoretical_model_limit": True, "not_validation_accuracy": True}
+
+
 def predict(model, cols, mix, age, fixed):
     x = feature_frame(pd.DataFrame([check_mix(mix)]), age, fixed, cols)
     y = np.asarray(model.predict(x),dtype=float).reshape(-1)
