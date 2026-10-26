@@ -264,33 +264,6 @@ def evaluate_validation(model, cols, val:pd.DataFrame, train:pd.DataFrame | None
     return metrics, results
 
 
-def target_match(predicted, target, *, margin=0.0, tolerance=0.01):
-    """Compare AI *point prediction* with user's requested strength.
-
-    This is matching a requested model output, NOT measuring prediction error
-    against a laboratory compressive-strength result.
-    """
-    vals=(predicted,target,margin,tolerance)
-    if not all(np.isfinite(float(x)) for x in vals) or target <= 0 or margin < 0 or tolerance < 0:
-        raise AuditError("Cường độ mục tiêu, dự báo hoặc dung sai không hợp lệ.")
-    delta=float(predicted-target)
-    lower=float(target+margin)
-    upper=float(lower+tolerance)
-    return {
-        "target_mpa":float(target),
-        "predicted_mpa":float(predicted),
-        "delta_mpa":delta,
-        "absolute_delta_mpa":abs(delta),
-        "absolute_delta_percent":abs(delta)/float(target)*100.,
-        "minimum_required_mpa":lower,
-        "maximum_near_mpa":upper,
-        "tolerance_mpa":float(tolerance),
-        "meets_minimum":bool(predicted+1e-8>=lower),
-        "near_from_above":bool(lower-1e-8<=predicted<=upper+1e-8),
-        "measured_in_lab":False,
-    }
-
-
 def request_id(payload):
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True,default=float).encode()).hexdigest()
 
@@ -299,16 +272,12 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
              air=.02, volume_tol=.02, steel_limit_percent=2.0, require_fa=True,
              require_ggbfs=True, require_quartz=False, cement_max=1000,
              min_present_kg=5., margin=0., use_distance=True, objective_mode="cement",
-             prices=None, seed=42,maxiter=38,popsize=7, target_tolerance=0.01):
+             prices=None, seed=42,maxiter=38,popsize=7):
     """Numerical search; valid numerical candidate != experimentally verified UHPC.
 
     DE searches inside per-material training quantile ranges, and chooses only
     candidates passing every final constraint. Returns infeasible status if none.
     """
-    if objective_mode not in ("cement", "cost", "near_target"):
-        raise AuditError("Chế độ tối ưu không hợp lệ.")
-    if not np.isfinite(target_tolerance) or target_tolerance < 0:
-        raise AuditError("Dung sai bám sát cường độ không hợp lệ.")
     if not wb_min>0 or not wb_max>=wb_min or cement_max<=0:
         raise AuditError("Giới hạn thiết kế không hợp lệ.")
     sub=train[np.isclose(train["Tuoi_duong_ho"],age)]
@@ -358,13 +327,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     train_hi=train[FEATURES_15].max().to_numpy(dtype=float)
     den=np.asarray([densities[k] for k in MATERIALS],dtype=float)
     if not np.isfinite(den).all() or (den<=0).any():raise AuditError("Khối lượng riêng không hợp lệ.")
-    best = {"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
-    best_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
-    best_above_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
-    best_raw={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
-    search_lo=np.array([b[0] for b in limits],dtype=float)
-    search_hi=np.array([b[1] for b in limits],dtype=float)
-    source=["Tối ưu số"]
+    best = {"loss":float("inf"),"mix":None,"prediction":None,"distance":None}
+    best_raw={"loss":float("inf"),"mix":None,"prediction":None,"distance":None}
     eval_count=[0]
     def expand(a):
         z=np.asarray(a,dtype=float)
@@ -384,9 +348,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         wb=samples[:,MATERIALS.index("Nuoc")]/np.maximum(1e-9,binder)
         steel=100*samples[:,MATERIALS.index("Soi_thep")]/den[MATERIALS.index("Soi_thep")]
         shortage=np.maximum(target+margin-predicted,0)
-        overrun=(np.maximum(predicted-(target+margin+target_tolerance),0)
-                 if objective_mode=="near_target" else np.zeros(n,dtype=float))
-        penalty=1e5*(shortage**2+overrun**2) + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
+        penalty=1e5*shortage**2 + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
         penalty+=1e7*np.maximum(np.abs(volume-(1-air))-volume_tol,0)**2
         penalty+=1e5*np.maximum(steel-steel_limit_percent,0)**2
         farr=f.loc[:,FEATURES_15].to_numpy(dtype=float)
@@ -409,67 +371,23 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             raw=samples @ np.array([prices[k] for k in MATERIALS],dtype=float)
             # Fixed normalizer: optimization objective must NOT depend on current population.
             raw=raw/baseline_cost * 500
-        elif objective_mode=="near_target":
-            # Sai lệch cường độ là tiêu chí chính. Không cộng trọng số xi măng
-            # khiến cấp phối xa 120 MPa hơn thắng một cấp phối sát 120 MPa.
-            raw=np.abs(predicted-(target+margin))
+        elif objective_mode=="near_target": raw=np.abs(predicted-target) * 3 + samples[:,0]*.04
         else: raw=samples[:,0]+samples[:,MATERIALS.index("Soi_thep")]*.25
         loss=raw+penalty
-        # DE stays in bounds, but the training rows used as seed below might not.
-        inside_search=((samples>=search_lo-1e-8)&(samples<=search_hi+1e-8)).all(axis=1)
-        required=(
-            (samples[:,MATERIALS.index("Tro_bay")]>=min_present_kg-1e-8 if require_fa else np.ones(n,bool)) &
-            (samples[:,MATERIALS.index("Xil_lo_cao")]>=min_present_kg-1e-8 if require_ggbfs else np.ones(n,bool)) &
-            (samples[:,MATERIALS.index("Bot_thach_anh")]>=min_present_kg-1e-8 if require_quartz else np.ones(n,bool))
-        )
-        safe=(inside_search & required &
-              (wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&
-              (np.abs(volume-(1-air))<=volume_tol+1e-8)&
-              (steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1))
-        if use_distance:
-            safe &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
-        valid=safe&(shortage<=1e-8)&(overrun<=1e-8)
+        valid=(shortage<=1e-8)&(wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&(np.abs(volume-(1-air))<=volume_tol+1e-8)&(steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1)
+        if use_distance:valid &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
         if valid.any():
             inds=np.flatnonzero(valid)
             k=inds[np.argmin(raw[inds])]
             if raw[k]<best["loss"]:
-                best.update(loss=float(raw[k]),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
-        if safe.any():
-            inds=np.flatnonzero(safe)
-            # If no target match is found, return the nearest *physically safe*
-            # prediction and explicitly mark strength mismatch as a failure.
-            score=np.abs(predicted[inds]-(target+margin))
-            if objective_mode!="near_target":
-                score=np.maximum(target+margin-predicted[inds],0)+np.maximum(predicted[inds]-(target+margin),0)
-            k=inds[np.argmin(score)]
-            if float(score.min())<best_safe["loss"]:
-                best_safe.update(loss=float(score.min()),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
-            if objective_mode=="near_target":
-                above=inds[predicted[inds]>=target+margin-1e-8]
-                if len(above):
-                    k_above=above[np.argmin(predicted[above]-(target+margin))]
-                    diff=float(predicted[k_above]-(target+margin))
-                    if diff<best_above_safe["loss"]:
-                        best_above_safe.update(loss=diff,mix=samples[k_above].copy(),prediction=float(predicted[k_above]),distance=float(dist[k_above]),origin=source[0])
+                best.update(loss=float(raw[k]),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]))
         j=int(np.argmin(loss))
         if loss[j]<best_raw["loss"]:
-            best_raw.update(loss=float(loss[j]),mix=samples[j].copy(),prediction=float(predicted[j]),distance=float(dist[j]),origin=source[0])
+            best_raw.update(loss=float(loss[j]),mix=samples[j].copy(),prediction=float(predicted[j]),distance=float(dist[j]))
         eval_count[0]+=n
         return loss
-    if objective_mode=="near_target":
-        # Recheck existing mixtures as model-predicted candidates; the training
-        # feature file does not establish their measured strengths.
-        rows=sub.loc[:,MATERIALS].drop_duplicates()
-        if len(rows)>1000:rows=rows.sample(n=1000,random_state=int(seed))
-        source[0]="Hàng train (AI dự báo lại)"
-        for start in range(0,len(rows),250):
-            block=rows.iloc[start:start+250].to_numpy(dtype=float)
-            objective(block[:,free].T)
-        source[0]="Tối ưu số"
     de = differential_evolution(objective,[limits[i] for i in free],seed=int(seed),maxiter=int(maxiter),popsize=int(popsize),tol=.01,polish=False,vectorized=True,updating="deferred")
-    chosen=(best if best["mix"] is not None else
-            best_above_safe if best_above_safe["mix"] is not None else
-            best_safe if best_safe["mix"] is not None else best_raw)
+    chosen=best if best["mix"] is not None else best_raw
     if chosen["mix"] is None:raise AuditError("Bộ giải không đánh giá được ứng viên nào.")
     mix=dict(zip(MATERIALS,map(float,chosen["mix"])))
     pred=predict(model,cols,mix,age,fixed)
@@ -477,16 +395,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     x_final=feature_frame(pd.DataFrame([mix]),age,fixed,cols)
     prox=distance_check(x_final,train,ref)
     group_prox=distance_check(x_final,sub,group_ref)
-    alignment=target_match(pred,target,margin=margin,tolerance=target_tolerance)
-    if objective_mode=="near_target":
-        checks[f"Cường độ AI sát mục tiêu (0–{target_tolerance:g} MPa phía trên)"]=alignment["near_from_above"]
     checks["Trong min–max từng đặc trưng train"]=not bool(prox.outside_features)
     if use_distance:
         checks["Gần dữ liệu train toàn tập (P95 NN)"]=prox.close
         checks["Gần train cùng tuổi/tổ hợp (P95 NN)"]=group_prox.close
-    return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(de.success),"evaluations":eval_count[0],"training_matches":len(sub),"iterations":int(de.nit),"mode":objective_mode,
-            "alignment":alignment,"candidate_origin":chosen["origin"],
-            "candidate_tier":("target_match" if best["mix"] is not None else
-                              "safe_above_not_matching" if best_above_safe["mix"] is not None else
-                              "safe_but_not_matching" if best_safe["mix"] is not None else
-                              "no_physically_safe_candidate")}
+    return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(de.success),"evaluations":eval_count[0],"training_matches":len(sub),"iterations":int(de.nit),"mode":objective_mode}
