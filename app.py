@@ -610,113 +610,24 @@ with tab_method:
     st.warning("Không có bảo đảm đạt cường độ thực tế ≥120 MPa. Dải giới hạn vật liệu là dải từ dữ liệu huấn luyện, không phải giới hạn tiêu chuẩn UHPC. Kết quả cần kiểm nghiệm độc lập.")
     st.markdown("**Thiếu dữ liệu thí nghiệm đặc thù:** tình trạng dưỡng hộ, tính công tác, đặc điểm sợi và nguồn cốt liệu có thể khác giữa các tài liệu. Không dùng ứng dụng này làm hồ sơ thiết kế cấp phối được phê duyệt khi chưa hiệu chuẩn và thí nghiệm.")
 st.markdown("""
-st.markdown("""
 <style>
-:root{
-    --bg-main: #020817;
-    --text-main: #FFFFFF;
-    --text-body: #E2E8F0;
-    --text-muted: #CBD5E1;
-
-    --card-bg: #F1F5F9;
-    --card-border: #CBD5E1;
-    --card-label: #475569;
-    --card-value: #0F172A;
-    --card-sub: #1E293B;
-
-    --success-bg: #14532D;
-    --success-text: #DCFCE7;
-
-    --info-bg: #0F2747;
-    --info-text: #DBEAFE;
-}
-
-/* Nền app */
-html, body, [data-testid="stAppViewContainer"] {
-    background: var(--bg-main);
-    color: var(--text-main);
-}
-
-/* Tiêu đề lớn */
-h1, h2, h3, h4 {
-    color: #FFFFFF !important;
-    font-weight: 800 !important;
-}
-
-/* Chữ đoạn văn */
-p, li, label, span, div {
-    color: var(--text-body);
-}
-
-/* Chữ phụ */
-.small-text, .muted-text {
-    color: var(--text-muted) !important;
-}
-
-/* Card số liệu */
 .metric-card {
-    background: var(--card-bg) !important;
-    border: 1px solid var(--card-border);
+    background: #F1F5F9 !important;
+    border: 1px solid #CBD5E1;
     border-radius: 18px;
     padding: 24px 20px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
 }
 
-/* Nhãn trong card */
 .metric-card .metric-label {
-    color: var(--card-label) !important;
+    color: #334155 !important;
     font-size: 16px;
     font-weight: 700;
-    margin-bottom: 14px;
 }
 
-/* Số chính */
 .metric-card .metric-value {
-    color: var(--card-value) !important;
+    color: #0F172A !important;
     font-size: 38px;
     font-weight: 800;
-    line-height: 1.15;
-}
-
-/* Ghi chú trong card */
-.metric-card .metric-sub {
-    color: var(--card-sub) !important;
-    font-size: 15px;
-    font-weight: 600;
-    margin-top: 6px;
-}
-
-/* Banner xanh lá */
-.success-banner {
-    background: var(--success-bg) !important;
-    color: var(--success-text) !important;
-    border-radius: 14px;
-    padding: 16px 18px;
-    font-size: 17px;
-    font-weight: 700;
-}
-
-/* Banner xanh dương */
-.info-banner {
-    background: var(--info-bg) !important;
-    color: var(--info-text) !important;
-    border-radius: 14px;
-    padding: 16px 18px;
-    font-size: 16px;
-    font-weight: 600;
-}
-
-/* Nội dung markdown */
-[data-testid="stMarkdownContainer"] p {
-    color: var(--text-body) !important;
-    font-size: 16px;
-    line-height: 1.6;
-}
-
-/* Các số nổi bật trong câu */
-.highlight-number {
-    color: #FFFFFF !important;
-    font-weight: 800 !important;
 }
 </style>
 """, unsafe_allow_html=True)
