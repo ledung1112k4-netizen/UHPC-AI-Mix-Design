@@ -32,7 +32,7 @@ TRAIN_PATH = next((x for x in TRAIN_CANDIDATES if x.exists()),TRAIN_CANDIDATES[0
 # Mức dung sai dự báo của chế độ bám sát mục tiêu, KHÔNG phải sai số thí nghiệm.
 TARGET_TOLERANCE_MPA = 0.01
 
-st.set_page_config(page_title="UHPC AI Studio 2.1", page_icon="🧱",layout="wide",initial_sidebar_state="expanded")
+st.set_page_config(page_title="UHPC AI Studio", page_icon="🧱",layout="wide",initial_sidebar_state="expanded")
 st.markdown("""<style>
 @import url('https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap');
 html,body,[class*="css"], [data-testid="stAppViewContainer"] {font-family:'Be Vietnam Pro','Segoe UI',sans-serif;}
@@ -79,67 +79,45 @@ def cached_reference_range(_model, _cols, _train, model_file, model_modified,
 
 with st.sidebar:
     st.markdown("## 🧱 UHPC AI STUDIO")
-    st.caption("PHÒNG THÍ NGHIỆM THIẾT KẾ CẤP PHỐI · 2.1")
+    st.caption("PHÒNG THÍ NGHIỆM THIẾT KẾ CẤP PHỐI")
     age=st.number_input("Tuổi nén (ngày)",min_value=1,max_value=365,value=28,step=1)
-    reference_range=None
-    reference_error=None
-    if model is not None and train is not None:
-        try:
-            reference_range=cached_reference_range(
-                model, cols, train, str(MODEL_PATH), MODEL_PATH.stat().st_mtime,
-                str(TRAIN_PATH), TRAIN_PATH.stat().st_mtime, int(age))
-        except (AuditError, ValueError, TypeError) as exc:
-            reference_error=str(exc)
-        except Exception as exc:
-            reference_error="Không tính được dải tham chiếu: " + type(exc).__name__
-
-    # Model regression has no intrinsic safe maximum. By default the UI's
-    # ceiling is the maximum ACTUAL model output on age-matched train rows.
-    # Optional exploration above that reference is visibly marked as such.
-    reference_max = (float(reference_range["reference_predicted_max_mpa"])
-                     if reference_range is not None else None)
-    have_reference_cap = (reference_max is not None and
-                          np.isfinite(reference_max) and reference_max > 120.0001)
-    if reference_range is not None:
-        st.caption(f"Dải AI trên {reference_range['reference_count']:,} cấp phối tham chiếu "
-                   f"cùng {age} ngày: {reference_range['reference_predicted_min_mpa']:.2f}–"
-                   f"{reference_max:.2f} MPa.")
-        st.caption("Giới hạn trên là mức **đã quan sát trong dự đoán train**, "
-                   "không phải cường độ tối đa toán học của mô hình hoặc bảo đảm nén mẫu.")
-    elif reference_error:
-        st.warning("Chưa xác định được giới hạn từ mô hình: " + reference_error)
-    elif model is not None and train is not None:
-        st.warning(f"Không có cấp phối tham chiếu ở đúng {age} ngày. "
-                   "Chưa thể xác định miền cường độ hỗ trợ ở tuổi này.")
-    else:
-        st.info("Cần nạp model và CSV dữ liệu để xác định giới hạn tham chiếu tự động.")
-
-    explore_beyond = st.checkbox("Cho phép khảo sát vượt dải dự báo tham chiếu",
-                                 value=False,
-                                 help="Cho phép nhập mục tiêu cao hơn mức dự báo lớn nhất "
-                                      "trên các hàng train cùng tuổi; đây là nghiên cứu "
-                                      "ngoài dải tham chiếu, không phải mô hình đã được kiểm định.")
-    auto_max = reference_max if have_reference_cap and not explore_beyond else None
-    # Floating value widget, not a dropdown or a list of fixed strength grades.
-    # The user can type e.g. 120.50, 127.35, 130, 143.75, etc.
-    # Exactly 120 MPa is a valid user request; do not force >120.
-    start_target = 120.0
-    target = st.number_input(
-        "Cường độ nén mục tiêu (MPa)",
-        min_value=120.0, max_value=auto_max,
-        value=float(start_target), step=0.1, format="%.4f",
-        key=f"target_{int(age)}_{'explore' if explore_beyond else 'reference'}_{reference_max:.4f}" if reference_max is not None else f"target_{int(age)}_unknown",
-        help="Nhập BẤT KỲ giá trị nào ≥120 MPa, tới trần tham chiếu "
-             "được tính từ chính mô hình ở tuổi đã chọn. Bật 'khảo sát vượt' "
-             "nếu muốn đánh giá mục tiêu cao hơn trần này.")
-    if reference_max is not None and target > reference_max + 1e-8:
-        st.warning(f"{target:.4f} MPa vượt mức dự báo tham chiếu lớn nhất "
-                   f"({reference_max:.4f} MPa) ở tuổi {age} ngày. "
-                   "Thuật toán có thể không tìm được nghiệm phù hợp.")
-    if reference_range is not None and not have_reference_cap:
-        st.warning("Dự báo tham chiếu chưa vượt 120 MPa tại tuổi đã chọn. "
-                   "Không có bằng chứng từ các cấp phối train rằng mục tiêu >120 MPa khả thi; "
-                   "bạn vẫn có thể thử nghiệm số nhưng phải kiểm chứng riêng.")
+    # Giao diện cũ: tuổi mẫu và cường độ mục tiêu nằm trực tiếp ở thanh bên.
+    # Không dùng giá trị dự đoán max của tập train để thay đổi max_value của ô nhập.
+    # Người dùng vẫn có thể khảo sát ngoài dải tham chiếu, với cảnh báo rõ ràng.
+    target=st.number_input(
+        "Cường độ mục tiêu (MPa)", min_value=120.0, max_value=300.0,
+        value=120.0, step=0.1, format="%.2f",
+        help="Mục tiêu nhập là giá trị AI cần hướng tới, không phải bảo đảm cường độ thực nghiệm."
+    )
+    # Giữ cơ chế kiểm tra dải dữ liệu cũ/mới ở phần nâng cao.
+    with st.expander("Thông tin miền dự báo (nâng cao)", expanded=False):
+        reference_range=None
+        reference_error=None
+        if model is not None and train is not None:
+            try:
+                reference_range=cached_reference_range(
+                    model,cols,train,str(MODEL_PATH),MODEL_PATH.stat().st_mtime,
+                    str(TRAIN_PATH),TRAIN_PATH.stat().st_mtime,int(age))
+            except (AuditError,ValueError,TypeError) as exc:
+                reference_error=str(exc)
+            except Exception as exc:
+                reference_error="Không tính được dải tham chiếu: "+type(exc).__name__
+        if reference_range is not None:
+            reference_max=float(reference_range["reference_predicted_max_mpa"])
+            st.caption(
+                f"Trên {reference_range['reference_count']:,} cấp phối tham chiếu cùng {age} ngày, "
+                f"AI dự đoán {reference_range['reference_predicted_min_mpa']:.2f}–"
+                f"{reference_max:.2f} MPa. Đây không phải giới hạn vật lý của UHPC."
+            )
+            if target > reference_max + 1e-8:
+                st.warning(
+                    f"Mục tiêu {target:.2f} MPa nằm trên dải dự báo tham chiếu "
+                    f"(tối đa {reference_max:.2f} MPa); cần kiểm chứng ngoại suy."
+                )
+        elif reference_error:
+            st.warning("Không xác định được dải tham chiếu: "+reference_error)
+        else:
+            st.caption("Chưa có dữ liệu huấn luyện để xác định dải dự báo tham chiếu.")
     margin=st.number_input("Biên dự phòng số học (MPa)",min_value=0.,max_value=50.,value=0.,step=1.,help="Không phải khoảng tin cậy; khi có calibration độc lập, xem riêng phần kiểm định.")
     batch_mode=st.radio("Đơn vị mẻ",["kg","m³"],horizontal=True)
     batch_size=st.number_input("Quy mô mẻ",min_value=.001,max_value=100000.,value=50. if batch_mode=="kg" else 1.,step=5. if batch_mode=="kg" else .1)
@@ -357,26 +335,32 @@ with t1:
         o1,o2=st.columns(2)
         with o1:
             opt_mode=st.selectbox("Mục tiêu tối ưu",["Giảm xi măng và sợi","Dự đoán gần mục tiêu","Giảm chi phí vật liệu"],index=1)
-            search_scope_label=st.selectbox(
-                "Phạm vi khám phá cấp phối",
-                ["Theo dữ liệu cùng nhóm (P5–P95)",
-                 "Khám phá tổ hợp mới (min–max toàn tập)",
-                 "Ngoại suy có giới hạn (ngoài min–max toàn tập)"],
-                index=0,
-                help="Khám phá tổ hợp mới không cần 5 mẫu cùng FA/GGBFS/tuổi; "
-                     "ngoại suy có giới hạn mở rộng từng vật liệu nhưng không mở rộng tuổi và đặc tính hóa lý.")
+            # Mặc định giao diện cũ: ràng buộc theo P95 và nhóm gần train.
+            # Các chế độ ngoại suy mới vẫn còn, chỉ chuyển vào khung thu gọn.
+            with st.expander("Khảo sát cấp phối mới / ngoại suy (nâng cao)", expanded=False):
+                search_scope_label=st.selectbox(
+                    "Phạm vi khám phá cấp phối",
+                    ["Theo dữ liệu cùng nhóm (P5–P95)",
+                     "Khám phá tổ hợp mới (min–max toàn tập)",
+                     "Ngoại suy có giới hạn (ngoài min–max toàn tập)"],
+                    index=0,
+                    help="Phạm vi càng xa train thì độ tin cậy càng khó kiểm chứng."
+                )
+                extension_pct=st.slider(
+                    "Mức mở rộng định lượng ngoài train (%)", 5, 20, 10, 1,
+                    disabled=search_scope_label != "Ngoại suy có giới hạn (ngoài min–max toàn tập)",
+                    help="Chỉ mở rộng khoảng tìm cấp phối; không làm tăng khả năng ngoại suy đã kiểm chứng của AI."
+                )
             search_scope={
                 "Theo dữ liệu cùng nhóm (P5–P95)":"same_group",
                 "Khám phá tổ hợp mới (min–max toàn tập)":"new_combinations",
                 "Ngoại suy có giới hạn (ngoài min–max toàn tập)":"limited_extrapolation",
             }[search_scope_label]
-            strict=st.checkbox("Bắt buộc gần dữ liệu train (P95 NN)",
-                               value=False, disabled=search_scope != "same_group",
-                               help="Tự tắt ở chế độ khám phá vì các tổ hợp ngoài train không thể đáp ứng điều kiện gần nhóm.")
-            extension_pct=st.slider("Mức mở rộng định lượng ngoài train (%)",5,20,10,1,
-                                    disabled=search_scope != "limited_extrapolation",
-                                    help="Mở rộng từng khoảng kg/m³ tối đa 20% độ rộng min–max toàn tập; "
-                                         "không phải mức sai số của AI.")
+            strict=st.checkbox(
+                "Bắt buộc gần dữ liệu train (P95 NN)",
+                value=True,disabled=search_scope != "same_group",
+                help="Chế độ an toàn chỉ tìm gần tập train. Khi khảo sát ngoại suy, chỉ báo cáo khoảng cách."
+            )
             min_present=st.number_input("Vật liệu bắt buộc: lượng tối thiểu (kg/m³)",min_value=.1,max_value=100.,value=5.,step=1.,help="Ngưỡng nghiên cứu để tránh nghiệm vật liệu > 0 nhưng gần bằng 0; không phải quy phạm.")
         with o2:
             st.caption("Thuộc tính FA/GGBFS khi tối ưu: cần sử dụng giá trị đúng vật liệu thực tế.")
