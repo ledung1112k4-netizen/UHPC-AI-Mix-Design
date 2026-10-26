@@ -609,25 +609,26 @@ with tab_method:
                                    for k, v in training_bounds.items()]), use_container_width=True, hide_index=True)
     st.warning("Không có bảo đảm đạt cường độ thực tế ≥120 MPa. Dải giới hạn vật liệu là dải từ dữ liệu huấn luyện, không phải giới hạn tiêu chuẩn UHPC. Kết quả cần kiểm nghiệm độc lập.")
     st.markdown("**Thiếu dữ liệu thí nghiệm đặc thù:** tình trạng dưỡng hộ, tính công tác, đặc điểm sợi và nguồn cốt liệu có thể khác giữa các tài liệu. Không dùng ứng dụng này làm hồ sơ thiết kế cấp phối được phê duyệt khi chưa hiệu chuẩn và thí nghiệm.")
-st.markdown("""
-<style>
+/* Card số liệu */
+[data-testid="stMetric"],
 .metric-card {
-    background: #F1F5F9 !important;
-    border: 1px solid #CBD5E1;
-    border-radius: 18px;
-    padding: 24px 20px;
+    background-color: #EEF2F5 !important;
+    border: 1px solid #CBD5E1 !important;
+    border-radius: 16px !important;
 }
 
+/* Tên chỉ số */
+[data-testid="stMetricLabel"] *,
 .metric-card .metric-label {
     color: #334155 !important;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 16px !important;
+    font-weight: 700 !important;
 }
 
+/* Giá trị số */
+[data-testid="stMetricValue"] *,
 .metric-card .metric-value {
     color: #0F172A !important;
-    font-size: 38px;
-    font-weight: 800;
+    font-size: 36px !important;
+    font-weight: 800 !important;
 }
-</style>
-""", unsafe_allow_html=True)
