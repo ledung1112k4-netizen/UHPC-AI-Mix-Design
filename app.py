@@ -609,3 +609,108 @@ with tab_method:
                                    for k, v in training_bounds.items()]), use_container_width=True, hide_index=True)
     st.warning("Không có bảo đảm đạt cường độ thực tế ≥120 MPa. Dải giới hạn vật liệu là dải từ dữ liệu huấn luyện, không phải giới hạn tiêu chuẩn UHPC. Kết quả cần kiểm nghiệm độc lập.")
     st.markdown("**Thiếu dữ liệu thí nghiệm đặc thù:** tình trạng dưỡng hộ, tính công tác, đặc điểm sợi và nguồn cốt liệu có thể khác giữa các tài liệu. Không dùng ứng dụng này làm hồ sơ thiết kế cấp phối được phê duyệt khi chưa hiệu chuẩn và thí nghiệm.")
+st.markdown("""
+<style>
+:root{
+    --bg-main: #020817;
+    --text-main: #F8FAFC;
+    --text-muted: #CBD5E1;
+
+    --card-bg: #F8FAFC;
+    --card-title: #64748B;
+    --card-value: #0F172A;
+    --card-sub: #334155;
+
+    --success-bg: #14532D;
+    --success-text: #DCFCE7;
+
+    --info-bg: #0F2747;
+    --info-text: #DBEAFE;
+}
+
+/* Nền tổng */
+html, body, [data-testid="stAppViewContainer"] {
+    background: var(--bg-main);
+    color: var(--text-main);
+}
+
+/* Tiêu đề section */
+h1, h2, h3, h4 {
+    color: var(--text-main) !important;
+    font-weight: 700 !important;
+}
+
+/* Chữ mô tả */
+p, li, span, label, div {
+    color: var(--text-main);
+}
+
+/* Chữ phụ */
+.small-text, .muted-text {
+    color: var(--text-muted) !important;
+}
+
+/* Card số liệu */
+.metric-card {
+    background: var(--card-bg) !important;
+    border-radius: 18px;
+    padding: 22px 20px;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.18);
+    border: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.metric-card .metric-label {
+    color: var(--card-title) !important;
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.metric-card .metric-value {
+    color: var(--card-value) !important;
+    font-size: 34px;
+    font-weight: 800;
+    line-height: 1.15;
+}
+
+.metric-card .metric-sub {
+    color: var(--card-sub) !important;
+    font-size: 14px;
+    font-weight: 500;
+    margin-top: 6px;
+}
+
+/* Banner xanh lá */
+.success-banner {
+    background: var(--success-bg) !important;
+    color: var(--success-text) !important;
+    border-radius: 14px;
+    padding: 16px 18px;
+    font-size: 16px;
+    font-weight: 700;
+}
+
+/* Banner xanh dương */
+.info-banner {
+    background: var(--info-bg) !important;
+    color: var(--info-text) !important;
+    border-radius: 14px;
+    padding: 16px 18px;
+    font-size: 16px;
+    font-weight: 600;
+}
+
+/* Nội dung markdown phụ trên nền tối */
+[data-testid="stMarkdownContainer"] p {
+    color: var(--text-muted);
+    font-size: 16px;
+}
+
+/* Làm nổi số */
+.big-number {
+    color: #0F172A !important;
+    font-weight: 800 !important;
+    letter-spacing: 0.2px;
+}
+</style>
+""", unsafe_allow_html=True)
