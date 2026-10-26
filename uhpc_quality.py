@@ -264,6 +264,33 @@ def evaluate_validation(model, cols, val:pd.DataFrame, train:pd.DataFrame | None
     return metrics, results
 
 
+def target_match(predicted, target, *, margin=0.0, tolerance=0.01):
+    """Compare AI *point prediction* with user's requested strength.
+
+    This is matching a requested model output, NOT measuring prediction error
+    against a laboratory compressive-strength result.
+    """
+    vals=(predicted,target,margin,tolerance)
+    if not all(np.isfinite(float(x)) for x in vals) or target <= 0 or margin < 0 or tolerance < 0:
+        raise AuditError("Cường độ mục tiêu, dự báo hoặc dung sai không hợp lệ.")
+    delta=float(predicted-target)
+    lower=float(target+margin)
+    upper=float(lower+tolerance)
+    return {
+        "target_mpa":float(target),
+        "predicted_mpa":float(predicted),
+        "delta_mpa":delta,
+        "absolute_delta_mpa":abs(delta),
+        "absolute_delta_percent":abs(delta)/float(target)*100.,
+        "minimum_required_mpa":lower,
+        "maximum_near_mpa":upper,
+        "tolerance_mpa":float(tolerance),
+        "meets_minimum":bool(predicted+1e-8>=lower),
+        "near_from_above":bool(lower-1e-8<=predicted<=upper+1e-8),
+        "measured_in_lab":False,
+    }
+
+
 def request_id(payload):
     return hashlib.sha256(json.dumps(payload,ensure_ascii=False,sort_keys=True,default=float).encode()).hexdigest()
 
@@ -272,12 +299,18 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
              air=.02, volume_tol=.02, steel_limit_percent=2.0, require_fa=True,
              require_ggbfs=True, require_quartz=False, cement_max=1000,
              min_present_kg=5., margin=0., use_distance=True, objective_mode="cement",
-             prices=None, seed=42,maxiter=38,popsize=7):
+             prices=None, seed=42,maxiter=38,popsize=7, target_tolerance=0.01, search_restarts=2):
     """Numerical search; valid numerical candidate != experimentally verified UHPC.
 
     DE searches inside per-material training quantile ranges, and chooses only
     candidates passing every final constraint. Returns infeasible status if none.
     """
+    if objective_mode not in ("cement", "cost", "near_target"):
+        raise AuditError("Chế độ tối ưu không hợp lệ.")
+    if not isinstance(search_restarts, int) or not 1 <= search_restarts <= 4:
+        raise AuditError("Số lượt tìm kiếm phải từ 1 đến 4.")
+    if not np.isfinite(target_tolerance) or target_tolerance < 0:
+        raise AuditError("Dung sai bám sát cường độ không hợp lệ.")
     if not wb_min>0 or not wb_max>=wb_min or cement_max<=0:
         raise AuditError("Giới hạn thiết kế không hợp lệ.")
     sub=train[np.isclose(train["Tuoi_duong_ho"],age)]
@@ -327,8 +360,14 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     train_hi=train[FEATURES_15].max().to_numpy(dtype=float)
     den=np.asarray([densities[k] for k in MATERIALS],dtype=float)
     if not np.isfinite(den).all() or (den<=0).any():raise AuditError("Khối lượng riêng không hợp lệ.")
-    best = {"loss":float("inf"),"mix":None,"prediction":None,"distance":None}
-    best_raw={"loss":float("inf"),"mix":None,"prediction":None,"distance":None}
+    best = {"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
+    best_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
+    best_above_safe={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
+    best_raw={"loss":float("inf"),"mix":None,"prediction":None,"distance":None,"origin":None}
+    preview_pool = {}   # shortlist: chỉ các ứng viên đạt ràng buộc số học, không phải mẫu đã nén
+    search_lo=np.array([b[0] for b in limits],dtype=float)
+    search_hi=np.array([b[1] for b in limits],dtype=float)
+    source=["Tối ưu số"]
     eval_count=[0]
     def expand(a):
         z=np.asarray(a,dtype=float)
@@ -348,7 +387,9 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         wb=samples[:,MATERIALS.index("Nuoc")]/np.maximum(1e-9,binder)
         steel=100*samples[:,MATERIALS.index("Soi_thep")]/den[MATERIALS.index("Soi_thep")]
         shortage=np.maximum(target+margin-predicted,0)
-        penalty=1e5*shortage**2 + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
+        overrun=(np.maximum(predicted-(target+margin+target_tolerance),0)
+                 if objective_mode=="near_target" else np.zeros(n,dtype=float))
+        penalty=1e5*(shortage**2+overrun**2) + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
         penalty+=1e7*np.maximum(np.abs(volume-(1-air))-volume_tol,0)**2
         penalty+=1e5*np.maximum(steel-steel_limit_percent,0)**2
         farr=f.loc[:,FEATURES_15].to_numpy(dtype=float)
@@ -371,23 +412,119 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             raw=samples @ np.array([prices[k] for k in MATERIALS],dtype=float)
             # Fixed normalizer: optimization objective must NOT depend on current population.
             raw=raw/baseline_cost * 500
-        elif objective_mode=="near_target": raw=np.abs(predicted-target) * 3 + samples[:,0]*.04
+        elif objective_mode=="near_target":
+            # Sai lệch cường độ là tiêu chí chính. Không cộng trọng số xi măng
+            # khiến cấp phối xa 120 MPa hơn thắng một cấp phối sát 120 MPa.
+            raw=np.abs(predicted-(target+margin))
         else: raw=samples[:,0]+samples[:,MATERIALS.index("Soi_thep")]*.25
         loss=raw+penalty
-        valid=(shortage<=1e-8)&(wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&(np.abs(volume-(1-air))<=volume_tol+1e-8)&(steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1)
-        if use_distance:valid &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
+        # DE stays in bounds, but the training rows used as seed below might not.
+        inside_search=((samples>=search_lo-1e-8)&(samples<=search_hi+1e-8)).all(axis=1)
+        required=(
+            (samples[:,MATERIALS.index("Tro_bay")]>=min_present_kg-1e-8 if require_fa else np.ones(n,bool)) &
+            (samples[:,MATERIALS.index("Xil_lo_cao")]>=min_present_kg-1e-8 if require_ggbfs else np.ones(n,bool)) &
+            (samples[:,MATERIALS.index("Bot_thach_anh")]>=min_present_kg-1e-8 if require_quartz else np.ones(n,bool))
+        )
+        safe=(inside_search & required &
+              (wb>=wb_min-1e-8)&(wb<=wb_max+1e-8)&
+              (np.abs(volume-(1-air))<=volume_tol+1e-8)&
+              (steel<=steel_limit_percent+1e-8)&(outside<=1e-8).all(axis=1))
+        if use_distance:
+            safe &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
+        valid=safe&(shortage<=1e-8)&(overrun<=1e-8)
         if valid.any():
             inds=np.flatnonzero(valid)
             k=inds[np.argmin(raw[inds])]
             if raw[k]<best["loss"]:
-                best.update(loss=float(raw[k]),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]))
+                best.update(loss=float(raw[k]),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
+        if safe.any():
+            inds=np.flatnonzero(safe)
+            if objective_mode == "near_target":
+                # Store only a few distinct candidates from each population. This
+                # ranking is diagnostic, independent of DE's smooth penalty loss.
+                near_order = sorted(inds, key=lambda ix: (
+                    0 if predicted[ix] >= target + margin - 1e-8 else 1,
+                    abs(predicted[ix] - (target+margin))))[:8]
+                for ix in near_order:
+                    key = tuple(np.round(samples[ix], 1))
+                    preview_pool[key] = {
+                        "prediction_mpa": float(predicted[ix]),
+                        "mix": dict(zip(MATERIALS, map(float, samples[ix]))),
+                        "distance": float(dist[ix]) if np.isfinite(dist[ix]) else None,
+                        "origin": source[0],
+                    }
+                if len(preview_pool)>150:
+                    ranking = sorted(preview_pool.items(), key=lambda item: (
+                        0 if item[1]["prediction_mpa"] >= target+margin-1e-8 else 1,
+                        abs(item[1]["prediction_mpa"]-(target+margin)),
+                    ))
+                    preview_pool.clear()
+                    preview_pool.update(ranking[:70])
+            # If no target match is found, return the nearest *physically safe*
+            # prediction and explicitly mark strength mismatch as a failure.
+            score=np.abs(predicted[inds]-(target+margin))
+            if objective_mode!="near_target":
+                score=np.maximum(target+margin-predicted[inds],0)+np.maximum(predicted[inds]-(target+margin),0)
+            k=inds[np.argmin(score)]
+            if float(score.min())<best_safe["loss"]:
+                best_safe.update(loss=float(score.min()),mix=samples[k].copy(),prediction=float(predicted[k]),distance=float(dist[k]),origin=source[0])
+            if objective_mode=="near_target":
+                above=inds[predicted[inds]>=target+margin-1e-8]
+                if len(above):
+                    k_above=above[np.argmin(predicted[above]-(target+margin))]
+                    diff=float(predicted[k_above]-(target+margin))
+                    if diff<best_above_safe["loss"]:
+                        best_above_safe.update(loss=diff,mix=samples[k_above].copy(),prediction=float(predicted[k_above]),distance=float(dist[k_above]),origin=source[0])
         j=int(np.argmin(loss))
         if loss[j]<best_raw["loss"]:
-            best_raw.update(loss=float(loss[j]),mix=samples[j].copy(),prediction=float(predicted[j]),distance=float(dist[j]))
+            best_raw.update(loss=float(loss[j]),mix=samples[j].copy(),prediction=float(predicted[j]),distance=float(dist[j]),origin=source[0])
         eval_count[0]+=n
         return loss
-    de = differential_evolution(objective,[limits[i] for i in free],seed=int(seed),maxiter=int(maxiter),popsize=int(popsize),tol=.01,polish=False,vectorized=True,updating="deferred")
-    chosen=best if best["mix"] is not None else best_raw
+    if objective_mode=="near_target":
+        # Recheck all observed material combinations (up to an explicit upper
+        # limit). We replace the 4 material-characterization columns by the
+        # current input, so these are NOT experimental matches or old labels.
+        rows=sub.loc[:,MATERIALS].drop_duplicates()
+        if len(rows)>3000: rows=rows.sample(n=3000,random_state=int(seed))
+        source[0]="Thành phần từ train, AI dự báo với thuộc tính đang chọn"
+        for start in range(0,len(rows),250):
+            block=rows.iloc[start:start+250].to_numpy(dtype=float)
+            objective(block[:,free].T)
+        source[0]="Tối ưu số"
+
+    # Independent starting populations help on piecewise-constant tree models.
+    # The real model.predict output is NEVER interpolated or overwritten.
+    attempts = search_restarts if objective_mode=="near_target" else 1
+    de_results = []
+    for restart in range(attempts):
+        source[0] = f"Tối ưu DE, lượt {restart+1}"
+        de_results.append(differential_evolution(
+            objective, [limits[i] for i in free], seed=int(seed)+restart*9973,
+            maxiter=int(maxiter), popsize=int(popsize), tol=.01, polish=False,
+            vectorized=True, updating="deferred"))
+
+    if objective_mode == "near_target":
+        # Local perturbations explore decision-tree plateaus without assuming
+        # continuity or adjusting predicted strength to the input target.
+        rng = np.random.default_rng(int(seed)+6347)
+        span = search_hi[free]-search_lo[free]
+        for fraction in (0.12,0.04,0.012,0.003):
+            center_rows = [v["mix"] for v in (best, best_above_safe, best_safe)
+                           if v["mix"] is not None]
+            if not center_rows:
+                center_rows = [np.array([x[0] for x in limits], dtype=float)]
+            center_rows = center_rows[:3]
+            proposals=[]
+            for row in center_rows:
+                z0=np.asarray(row)[free]
+                local=z0+rng.normal(size=(120,len(free)))*(span*fraction)
+                proposals.append(np.clip(local,search_lo[free],search_hi[free]))
+            source[0]=f"Tinh chỉnh cục bộ ({fraction:.3g})"
+            objective(np.concatenate(proposals).T)
+    de = de_results[-1]
+    chosen=(best if best["mix"] is not None else
+            best_above_safe if best_above_safe["mix"] is not None else
+            best_safe if best_safe["mix"] is not None else best_raw)
     if chosen["mix"] is None:raise AuditError("Bộ giải không đánh giá được ứng viên nào.")
     mix=dict(zip(MATERIALS,map(float,chosen["mix"])))
     pred=predict(model,cols,mix,age,fixed)
@@ -395,8 +532,33 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     x_final=feature_frame(pd.DataFrame([mix]),age,fixed,cols)
     prox=distance_check(x_final,train,ref)
     group_prox=distance_check(x_final,sub,group_ref)
+    alignment=target_match(pred,target,margin=margin,tolerance=target_tolerance)
+    if objective_mode=="near_target":
+        checks[f"Cường độ AI sát mục tiêu (0–{target_tolerance:g} MPa phía trên)"]=alignment["near_from_above"]
     checks["Trong min–max từng đặc trưng train"]=not bool(prox.outside_features)
     if use_distance:
         checks["Gần dữ liệu train toàn tập (P95 NN)"]=prox.close
         checks["Gần train cùng tuổi/tổ hợp (P95 NN)"]=group_prox.close
-    return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(de.success),"evaluations":eval_count[0],"training_matches":len(sub),"iterations":int(de.nit),"mode":objective_mode}
+    # Report alternatives only if numerically safe. Every displayed prediction
+    # comes from the original, already loaded model (never generated as target).
+    sorted_pool = sorted(preview_pool.values(), key=lambda row: (
+        0 if row["prediction_mpa"] >= target+margin-1e-8 else 1,
+        abs(row["prediction_mpa"]-(target+margin)),
+        row["mix"]["Xi_mang"],
+    ))
+    alternatives = []
+    for candidate in sorted_pool:
+        if len(alternatives) >= 5: break
+        if any(all(abs(candidate["mix"][k]-old["mix"][k])<0.5 for k in MATERIALS)
+               for old in alternatives):
+            continue
+        candidate = dict(candidate)
+        candidate["difference_mpa"] = float(candidate["prediction_mpa"]-target)
+        alternatives.append(candidate)
+    return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(all(z.success for z in de_results)),"evaluations":eval_count[0],"training_matches":len(sub),"iterations":sum(int(z.nit) for z in de_results),"mode":objective_mode,
+            "alignment":alignment,"candidate_origin":chosen["origin"],"search_restarts":attempts,
+            "alternatives":alternatives,
+            "candidate_tier":("target_match" if best["mix"] is not None else
+                              "safe_above_not_matching" if best_above_safe["mix"] is not None else
+                              "safe_but_not_matching" if best_safe["mix"] is not None else
+                              "no_physically_safe_candidate")}
