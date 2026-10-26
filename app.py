@@ -122,7 +122,7 @@ st.markdown("""
 <div class="hero">
 <small>UHPC STUDIO • AI-ASSISTED MIX DESIGN</small>
 <h1>Thiết kế cấp phối bê tông UHPC</h1>
-<p>Dự đoán cường độ nén và đề xuất cấp phối có tro bay &amp; xỉ lò cao.</p>
+<p>Dự đoán cường độ nén và đề xuất cấp phối có tro bay &amp; xỉ lò cao, cường độ chịu nén >= 120Mpa.</p>
 </div>
 """, unsafe_allow_html=True)
 
