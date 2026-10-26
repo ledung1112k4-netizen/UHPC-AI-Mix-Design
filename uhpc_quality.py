@@ -322,7 +322,6 @@ def target_match(predicted, target, *, margin=0.0, tolerance=0.01):
         "tolerance_mpa":float(tolerance),
         "meets_minimum":bool(predicted+1e-8>=lower),
         "near_from_above":bool(lower-1e-8<=predicted<=upper+1e-8),
-        "near_in_both_directions": bool(abs(predicted-lower) <= tolerance + 1e-8),
         "measured_in_lab":False,
     }
 
@@ -336,7 +335,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
              require_ggbfs=True, require_quartz=False, cement_max=1000,
              min_present_kg=5., margin=0., use_distance=True, objective_mode="cement",
              prices=None, seed=42,maxiter=38,popsize=7, target_tolerance=0.01, search_restarts=2,
-             search_scope="same_group", extension_fraction=0.10, material_bounds=None):
+             search_scope="same_group", extension_fraction=0.10):
     """Numerical search; valid numerical candidate != experimentally verified UHPC.
 
     DE searches inside per-material training quantile ranges, and chooses only
@@ -363,6 +362,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     for k,required in [("Tro_bay",require_fa),("Xil_lo_cao",require_ggbfs),("Bot_thach_anh",require_quartz)]:
         if required:
             same_group=same_group[same_group[k]>=min_present_kg]
+    # Một cấp phối có nhiều phép đo/lần nén không tạo thêm nhóm vật liệu mới.
+    same_group = same_group.drop_duplicates(subset=FEATURES_15).copy()
     group_matches=int(len(same_group))
     if search_scope == "same_group":
         if group_matches < 5:
@@ -388,30 +389,6 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             # training observation, and never a material specification.
             low = (low-extension_fraction*width).clip(lower=0)
             high = high+extension_fraction*width
-    # Per-material editable limits may exceed train min/max, but never remove
-    # physical constraints (cement, steel volume, W/B or volume closure).
-    # This is extrapolation of MODEL INPUTS, not proof of ML accuracy.
-    overrides = dict(material_bounds or {})
-    invalid_keys = set(overrides) - set(MATERIALS)
-    if invalid_keys:
-        raise AuditError("Vật liệu tùy chỉnh không được nhận dạng: " + ", ".join(sorted(invalid_keys)))
-    if overrides and search_scope == "same_group":
-        raise AuditError("Tùy chỉnh định lượng ngoài train phải dùng 'Khám phá tổ hợp mới' hoặc 'Ngoại suy có giới hạn'.")
-    train_material_bounds = {k:(float(train[k].min()), float(train[k].max())) for k in MATERIALS}
-    custom_unlearned = []
-    for k, requested in overrides.items():
-        try:
-            l_user, h_user = (float(requested[0]), float(requested[1]))
-        except (TypeError, KeyError, ValueError, IndexError) as exc:
-            raise AuditError(f"Khoảng định lượng {LABELS.get(k,k)} phải có min/max hợp lệ.") from exc
-        if not (np.isfinite(l_user) and np.isfinite(h_user) and 0 <= l_user <= h_user):
-            raise AuditError(f"Min/max {LABELS.get(k,k)} không hợp lệ: phải hữu hạn, không âm và min ≤ max.")
-        if h_user > 10000:  # guard against accidental units (g instead of kg/m³)
-            raise AuditError(f"Giới hạn {LABELS.get(k,k)} quá lớn (>10.000 kg/m³). Kiểm tra đơn vị nhập.")
-        low[k], high[k] = l_user, h_user
-        observed_lo, observed_hi = train_material_bounds[k]
-        if abs(observed_hi-observed_lo) < 1e-9 and (abs(l_user-observed_lo)>1e-9 or abs(h_user-observed_hi)>1e-9):
-            custom_unlearned.append(k)
     limits=[]
     for k in MATERIALS:
         l,h=max(0,float(low[k])),float(high[k])
@@ -426,12 +403,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
                     raise AuditError(f"{LABELS.get(k,k)} không có đủ mẫu chứa ≥{min_present_kg:g} kg/m³ trong toàn bộ train. "
                                      "Cần bổ sung dữ liệu vật liệu này và huấn luyện lại trước khi ngoại suy.")
                 l=max(l,min_present_kg)
-        if h < l:
-            if k == "Soi_thep":
-                raise AuditError(f"Miền sợi thép vượt giới hạn {steel_limit_percent:g}% thể tích "
-                                 f"({float(densities[k])*steel_limit_percent/100.:.1f} kg/m³). "
-                                 "Tăng giới hạn sợi thép trong Sidebar nếu có cơ sở kỹ thuật.")
-            raise AuditError(f"Không có miền khả thi cho {LABELS.get(k,k)}.")
+        if h < l: raise AuditError(f"Không có miền khả thi cho {LABELS.get(k,k)}.")
         limits.append((l,h))
     # Fixed zero-width dimensions are removed to support SciPy all versions.
     free=[i for i,(a,b) in enumerate(limits) if b>a+1e-9]
@@ -485,13 +457,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         shortage=np.maximum(target+margin-predicted,0)
         overrun=(np.maximum(predicted-(target+margin+target_tolerance),0)
                  if objective_mode=="near_target" else np.zeros(n,dtype=float))
-        # Exact-target mode minimizes the distance to the requested prediction
-        # from EITHER side. A hard below-target penalty traps DE at high
-        # plateaus (e.g. 147 MPa when user wants 135 MPa). The minimum
-        # threshold is still independently audited after optimization.
-        strength_penalty=(np.zeros(n) if objective_mode=="near_target"
-                          else shortage**2)
-        penalty=1e5*strength_penalty + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
+        penalty=1e5*(shortage**2+overrun**2) + 1e7*(np.maximum(wb_min-wb,0)**2+np.maximum(wb-wb_max,0)**2)
         penalty+=1e7*np.maximum(np.abs(volume-(1-air))-volume_tol,0)**2
         penalty+=1e5*np.maximum(steel-steel_limit_percent,0)**2
         farr=f.loc[:,FEATURES_15].to_numpy(dtype=float)
@@ -547,8 +513,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             safe &= (outside[:,protected]<=1e-8).all(axis=1)
         if use_distance:
             safe &= (dist<=ref[3]+1e-8)&(group_dist<=group_ref[3]+1e-8)
-        valid=(safe & (shortage<=1e-8) & (overrun<=1e-8)
-               if objective_mode=="near_target" else safe & (shortage<=1e-8))
+        valid=safe&(shortage<=1e-8)&(overrun<=1e-8)
         if valid.any():
             inds=np.flatnonzero(valid)
             k=inds[np.argmin(raw[inds])]
@@ -560,8 +525,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
                 # Store only a few distinct candidates from each population. This
                 # ranking is diagnostic, independent of DE's smooth penalty loss.
                 near_order = sorted(inds, key=lambda ix: (
-                    abs(predicted[ix] - (target+margin)),
-                    0 if predicted[ix] >= target + margin - 1e-8 else 1))[:12]
+                    0 if predicted[ix] >= target + margin - 1e-8 else 1,
+                    abs(predicted[ix] - (target+margin))))[:8]
                 for ix in near_order:
                     key = tuple(np.round(samples[ix], 1))
                     preview_pool[key] = {
@@ -572,8 +537,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
                     }
                 if len(preview_pool)>150:
                     ranking = sorted(preview_pool.items(), key=lambda item: (
-                        abs(item[1]["prediction_mpa"]-(target+margin)),
                         0 if item[1]["prediction_mpa"] >= target+margin-1e-8 else 1,
+                        abs(item[1]["prediction_mpa"]-(target+margin)),
                     ))
                     preview_pool.clear()
                     preview_pool.update(ranking[:70])
@@ -611,51 +576,6 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             objective(block[:,free].T)
         source[0]="Tối ưu số"
 
-    if objective_mode == "near_target":
-        # Broad, seeded search that REPAIRS two key physical relationships:
-        # choose W/B within user limits and solve sand from absolute-volume
-        # closure. It finds far more engineering-admissible candidates than
-        # blindly drawing 9 independent ingredients. No y labels or model
-        # outputs are invented: every candidate is evaluated by model.predict.
-        rng = np.random.default_rng(int(seed) + 23811)
-        ix={k:i for i,k in enumerate(MATERIALS)}
-        sand_i, water_i = ix["Cat"], ix["Nuoc"]
-        binder_i=np.array([ix[k] for k in BINDER],dtype=int)
-        sand_free = sand_i in free
-        water_free = water_i in free
-
-        def generate_repaired(n, center=None, spread=1.0):
-            if center is None:
-                arr=rng.uniform(search_lo,search_hi,size=(n,len(MATERIALS)))
-            else:
-                arr=np.clip(np.asarray(center,dtype=float)[None,:]
-                    +rng.normal(size=(n,len(MATERIALS)))*(search_hi-search_lo)*spread,
-                    search_lo,search_hi)
-            if water_free:
-                if center is None:
-                    wbr=rng.uniform(wb_min,wb_max,n)
-                else:
-                    old_wb=float(center[water_i])/max(1e-8,float(np.sum(np.asarray(center)[binder_i])))
-                    wbr=np.clip(old_wb+rng.normal(size=n)*max(0.002,(wb_max-wb_min)*spread),wb_min,wb_max)
-                arr[:,water_i]=wbr*arr[:,binder_i].sum(axis=1)
-            if sand_free:
-                v_without_sand=(arr/den).sum(axis=1)-arr[:,sand_i]/den[sand_i]
-                arr[:,sand_i]=(1-air-v_without_sand)*den[sand_i]
-            good=(np.isfinite(arr).all(axis=1)
-                  &(arr>=search_lo-1e-8).all(axis=1)
-                  &(arr<=search_hi+1e-8).all(axis=1))
-            return arr[good]
-
-        def evaluate_repaired(rows, label):
-            source[0]=label
-            for start in range(0,len(rows),256):
-                objective(rows[start:start+256,free].T)
-
-        evaluate_repaired(generate_repaired(5000), "Quét cấp phối có cân bằng W/B và thể tích")
-        # Search across DISTINCT close candidates, not only one winning DE
-        # plateau. Local search runs again after DE below.
-        source[0]="Tối ưu số"
-
     # Independent starting populations help on piecewise-constant tree models.
     # The real model.predict output is NEVER interpolated or overwritten.
     attempts = search_restarts if objective_mode=="near_target" else 1
@@ -672,18 +592,6 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         # continuity or adjusting predicted strength to the input target.
         rng = np.random.default_rng(int(seed)+6347)
         span = search_hi[free]-search_lo[free]
-        for fraction in (0.24, 0.10, 0.035, 0.009):
-            elites=sorted(preview_pool.values(),key=lambda row:(
-                abs(row["prediction_mpa"]-(target+margin)),
-                0 if row["prediction_mpa"]>=target+margin else 1))[:16]
-            repaired=[]
-            for elite in elites:
-                center=[elite["mix"][k] for k in MATERIALS]
-                repaired.append(generate_repaired(48,center=center,spread=fraction))
-            if repaired:
-                pool=np.concatenate(repaired)
-                if len(pool): evaluate_repaired(pool,f"Quét thích nghi quanh nghiệm gần ({fraction:.3g})")
-        source[0]="Tinh chỉnh cục bộ"
         for fraction in (0.12,0.04,0.012,0.003):
             center_rows = [v["mix"] for v in (best, best_above_safe, best_safe)
                            if v["mix"] is not None]
@@ -698,11 +606,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             source[0]=f"Tinh chỉnh cục bộ ({fraction:.3g})"
             objective(np.concatenate(proposals).T)
     de = de_results[-1]
-    # If no match within the requested window exists, report the closest
-    # physically admissible candidate even if it is slightly below target.
-    # A below-target point is NEVER labelled as meeting the minimum.
     chosen=(best if best["mix"] is not None else
-            best_safe if objective_mode=="near_target" and best_safe["mix"] is not None else
             best_above_safe if best_above_safe["mix"] is not None else
             best_safe if best_safe["mix"] is not None else best_raw)
     if chosen["mix"] is None:raise AuditError("Bộ giải không đánh giá được ứng viên nào.")
@@ -719,7 +623,7 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     # Report exactly/near identical known component quantities transparently.
     approximate_train_match=bool(np.any(np.max(np.abs(observed_mass-sample_mass),axis=1)<0.5))
     if objective_mode=="near_target":
-        checks[f"Cường độ AI sát mục tiêu (±{target_tolerance:g} MPa)"]=alignment["near_in_both_directions"]
+        checks[f"Cường độ AI sát mục tiêu (0–{target_tolerance:g} MPa phía trên)"]=alignment["near_from_above"]
     # In limited extrapolation, training bounds are evidence diagnostics only;
     # they cannot be interpreted as engineering safety constraints.
     if search_scope == "same_group":
@@ -730,8 +634,8 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
     # Report alternatives only if numerically safe. Every displayed prediction
     # comes from the original, already loaded model (never generated as target).
     sorted_pool = sorted(preview_pool.values(), key=lambda row: (
-        abs(row["prediction_mpa"]-(target+margin)),
         0 if row["prediction_mpa"] >= target+margin-1e-8 else 1,
+        abs(row["prediction_mpa"]-(target+margin)),
         row["mix"]["Xi_mang"],
     ))
     alternatives = []
@@ -745,10 +649,6 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
         alternatives.append(candidate)
     return {"mix":mix,"prediction":pred,"physical":phys,"checks":checks,"proximity":prox,"group_proximity":group_prox,"feasible":bool(all(checks.values())),"optimizer_success":bool(all(z.success for z in de_results)),"evaluations":eval_count[0],"training_matches":group_matches,"iterations":sum(int(z.nit) for z in de_results),"mode":objective_mode,
             "search_scope":search_scope, "extension_fraction":float(extension_fraction),
-            "material_bounds_requested": {k:list(map(float,v)) for k,v in overrides.items()},
-            "material_bounds_applied": {k:list(map(float,limits[i])) for i,k in enumerate(MATERIALS)},
-            "material_bounds_train": {k:list(map(float,train_material_bounds[k])) for k in MATERIALS},
-            "material_effect_not_learned": list(custom_unlearned),
             "observed_age_matches":int(len(age_data)),
             "outside_training_features":list(prox.outside_features),
             "outside_training_distribution":bool(not prox.close or group_matches < 5),
@@ -757,7 +657,6 @@ def optimize(model,cols,train,age,fixed,densities,target, *, wb_min=.14,wb_max=.
             "alignment":alignment,"candidate_origin":chosen["origin"],"search_restarts":attempts,
             "alternatives":alternatives,
             "candidate_tier":("target_match" if best["mix"] is not None else
-                              "safe_but_not_matching" if objective_mode=="near_target" and best_safe["mix"] is not None else
                               "safe_above_not_matching" if best_above_safe["mix"] is not None else
                               "safe_but_not_matching" if best_safe["mix"] is not None else
                               "no_physically_safe_candidate")}
