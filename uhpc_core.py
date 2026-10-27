@@ -580,16 +580,16 @@ def optimize_mix(
             training, feature_cols, age, rules, densities["Soi_thep"]
         )
         support_count = len(local_reference)
-        if support_count < 6:
+        # Chỉ áp dụng ngưỡng P95 cục bộ khi có đủ mẫu cùng tổ hợp.
+        # Chế độ khám phá vẫn chạy mô hình thật, nhưng phải báo ngoại suy.
+        if support_count >= 6:
+            similarity_context = _prepare_similarity_index(local_reference, feature_cols)
+        elif rules.similarity_policy == "strict":
             raise ValueError(
-                f"Chỉ có {support_count} mẫu train duy nhất cùng tuổi {age:g} ngày và "
-                "tổ hợp vật liệu đã chọn. Không đủ cơ sở để sàng lọc khoảng cách; "
-                "hãy bổ sung dữ liệu thực nghiệm hoặc đổi tổ hợp."
+                f"Chỉ có {support_count} mẫu train duy nhất cùng tuổi {age:g} ngày "
+                "và tổ hợp vật liệu. Chọn 'Khám phá có cảnh báo ngoại suy' "
+                "để tìm ứng viên, hoặc bổ sung dữ liệu thực nghiệm."
             )
-        similarity_context = _prepare_similarity_index(local_reference, feature_cols)
-        # Đánh giá song song toàn train để tránh P95 cục bộ quá rộng khi chỉ
-        # có vài chục mẫu: cần thỏa cả hai ngưỡng, tuyệt đối không đánh tráo
-        # ngưỡng của nhóm này cho khoảng cách của nhóm kia.
         global_similarity_context = _prepare_similarity_index(training, feature_cols)
     elif rules.binder_mode != "BOTH" or rules.silica_mode != "optional" or rules.quartz_mode != "optional":
         raise ValueError(
@@ -636,15 +636,19 @@ def optimize_mix(
         # Chỉ ƯU TIÊN (không ép) kết quả gần mục tiêu; dự đoán vẫn do model thật trả về.
         excessive_strength = np.maximum(predictions - (target_mpa + rules.margin_mpa), 0.0)
         near_target_penalty = 2.0 * excessive_strength if rules.prefer_near_target else np.zeros(len(df))
-        if similarity_context is not None:
-            local_distances = _candidate_distances(features_frame, similarity_context)
+        if global_similarity_context is not None:
             global_distances = _candidate_distances(features_frame, global_similarity_context)
-            local_limit = similarity_context["reference_p95"]
             global_limit = global_similarity_context["reference_p95"]
-            close_to_train = ((local_distances <= local_limit + 1e-12) &
-                              (global_distances <= global_limit + 1e-12))
-            local_violation = np.maximum(local_distances / max(local_limit, 1e-8) - 1.0, 0.0)
             global_violation = np.maximum(global_distances / max(global_limit, 1e-8) - 1.0, 0.0)
+            if similarity_context is not None:
+                local_distances = _candidate_distances(features_frame, similarity_context)
+                local_limit = similarity_context["reference_p95"]
+                local_violation = np.maximum(local_distances / max(local_limit, 1e-8) - 1.0, 0.0)
+                close_to_train = ((local_distances <= local_limit + 1e-12) &
+                                  (global_distances <= global_limit + 1e-12))
+            else:
+                local_violation = np.zeros(len(df))
+                close_to_train = global_distances <= global_limit + 1e-12
         else:
             close_to_train = np.ones(len(df), dtype=bool)
             local_violation = global_violation = np.zeros(len(df))
@@ -706,13 +710,14 @@ def optimize_mix(
     extra = bound_warnings(proposal_frame, training_bounds)
     final_similarity = None
     final_similarity_local = None
-    if similarity_context is not None:
-        local_d = float(_candidate_distances(proposal_frame, similarity_context)[0])
+    if global_similarity_context is not None:
         global_d = float(_candidate_distances(proposal_frame, global_similarity_context)[0])
-        final_similarity_local = _similarity_summary(
-            local_d, similarity_context,
-            scope=f"Mẫu train cùng tuổi {age:g} ngày và tổ hợp vật liệu đã chọn",
-        )
+        if similarity_context is not None:
+            local_d = float(_candidate_distances(proposal_frame, similarity_context)[0])
+            final_similarity_local = _similarity_summary(
+                local_d, similarity_context,
+                scope=f"Mẫu train cùng tuổi {age:g} ngày và tổ hợp vật liệu đã chọn",
+            )
         final_similarity = _similarity_summary(
             global_d, global_similarity_context,
             scope="Toàn bộ dữ liệu train (bộ kiểm tra chéo miền dữ liệu)",
@@ -758,6 +763,9 @@ def optimize_mix(
             "Không tìm được nghiệm vừa đạt cường độ dự đoán, điều kiện vật lý VÀ "
             "khoảng cách P95. Không được nâng cường độ dự đoán giả hoặc tự nới ngưỡng để báo đạt."
         )
+    if support_count is not None and support_count == 0:
+        warnings.append("NGOẠI SUY MẠNH: không có mẫu train 28 ngày cùng tổ hợp vật liệu. "
+                        "Cường độ AI chưa được xác thực cho hệ không SF/không bột thạch anh.")
     if support_count is not None and support_count < 10:
         warnings.append(
             f"Chỉ có {support_count} tổ hợp đặc trưng train khác nhau khớp điều kiện; "

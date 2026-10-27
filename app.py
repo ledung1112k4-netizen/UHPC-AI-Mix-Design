@@ -588,11 +588,11 @@ with tab_inverse:
     with st.expander("Silica fume và bột thạch anh — cài đặt riêng", expanded=True):
         csf, cqp = st.columns(2)
         silica_mode = csf.selectbox(
-            "Silica fume", list(POLICY_CHOICES), index=1,
+            "Silica fume", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("off"),
             format_func=lambda value: POLICY_CHOICES[value], key="silica_policy_selector",
         )
         quartz_mode = cqp.selectbox(
-            "Bột thạch anh (chất độn)", list(POLICY_CHOICES), index=1,
+            "Bột thạch anh (chất độn)", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("off"),
             format_func=lambda value: POLICY_CHOICES[value], key="quartz_policy_selector",
         )
         st.caption("Bột thạch anh là chất độn, không được tính là chất liên kết trong W/B quy ước. Chọn 'Không sử dụng' sẽ cố định lượng vật liệu bằng 0 kg/m³.")
@@ -621,7 +621,8 @@ with tab_inverse:
         st.markdown("#### 🔎 Kiểm soát ngoại suy trong lúc tối ưu")
         safe_mode = st.radio(
             "Phương pháp chọn cấp phối",
-            ["Ưu tiên độ tin cậy (khuyến nghị)", "Chỉ cảnh báo ngoại suy (đối chiếu v6)"],
+            ["Ưu tiên độ tin cậy (khuyến nghị)", "Khám phá có cảnh báo ngoại suy"],
+            index=1 if (silica_mode == "off" and quartz_mode == "off") else 0,
             horizontal=False,
             help="Chế độ khuyến nghị buộc ứng viên phải có khoảng cách láng giềng "
                  "không vượt mốc P95 của các mẫu train cùng tuổi và cùng tổ hợp vật liệu. "
@@ -635,8 +636,8 @@ with tab_inverse:
                  "ít nhất có thể; luôn hiển thị kết quả model tính thật. "
                  "Nếu chưa có nghiệm gần mục tiêu, vẫn báo chính xác kết quả tìm được.",
         )
-        st.caption("Nếu dữ liệu cùng tổ hợp quá ít hoặc không có nghiệm nằm trong vùng P95, "
-                   "app sẽ báo 'chưa tìm được' thay vì tự tạo ra cấp phối đạt.")
+        st.caption("Khám phá cho phép AI dự đoán ứng viên khi không có mẫu cùng tổ hợp. "
+                   "Đây là ngoại suy chưa được kiểm chứng, không phải cấp phối đã đạt cường độ thực nghiệm.")
         with st.expander("Ràng buộc kỹ thuật — điều chỉnh theo đề tài và vật liệu thực tế"):
             a, b, c = st.columns(3)
             wb_min = a.number_input("W/B tối thiểu", min_value=0.05, max_value=0.50, value=0.14, step=0.01, format="%.2f")
@@ -693,6 +694,8 @@ with tab_inverse:
             if training is not None:
                 support = count_training_matches(training, rules, densities["Soi_thep"])
                 st.info(f"Dữ liệu huấn luyện có **{support} tổ hợp đặc trưng khác nhau** khớp trạng thái vật liệu và ngưỡng tối thiểu. Không phải số thí nghiệm độc lập hoặc đánh giá độ tin cậy.")
+                if support == 0:
+                    st.warning("Không có mẫu train cùng điều kiện: kết quả khám phá chỉ là dự đoán ngoại suy, cần thí nghiệm xác nhận.")
             with st.spinner("Đang dự đoán theo lô và tìm cấp phối phù hợp tổ hợp đã chọn..."):
                 result = optimize_mix(
                     model, features, training_bounds, float(age), fixed, densities,
@@ -722,6 +725,8 @@ with tab_inverse:
             else "Chỉ cảnh báo khoảng cách (cách cũ, để đối chiếu)"
         ))
         if result["feasible"]:
+            if result.get("training_support_count") == 0:
+                st.warning("Ứng viên đạt các điều kiện số học theo AI, nhưng KHÔNG có mẫu train cùng hệ vật liệu. Không được coi là cấp phối đã kiểm chứng.")
             validation = bundle.get("validation", {})
             q90 = validation.get("calibration_q90_abs_error_mpa") if isinstance(validation, dict) else None
             uncertain_target = (
