@@ -127,6 +127,7 @@ DEFAULT_FIXED = {
 
 @dataclass(frozen=True)
 class DesignRules:
+    material_limits: dict[str, tuple[float, float]] | None = None
     wb_min: float = 0.14
     wb_max: float = 0.24
     air_fraction: float = 0.02
@@ -153,6 +154,10 @@ class DesignRules:
     prefer_near_target: bool = True
 
     def validate(self) -> None:
+        if self.material_limits is not None:
+            for key, (lo, hi) in self.material_limits.items():
+                if key not in MATERIALS or not (np.isfinite(lo) and np.isfinite(hi) and 0 <= lo <= hi):
+                    raise ValueError(f"Giới hạn vật liệu không hợp lệ: {key}")
         if not (0 < self.wb_min <= self.wb_max < 1):
             raise ValueError("Giới hạn W/B không hợp lệ.")
         if not (0 <= self.air_fraction < 0.2):
@@ -251,6 +256,7 @@ def material_search_bounds(
     rules: DesignRules,
     max_cement: float,
     steel_density: float = 7850.0,
+    min_cement: float = 400.0,
 ) -> list[tuple[float, float]]:
     """Áp ràng buộc từng vật liệu trực tiếp vào vector tối ưu DE."""
     rules.validate()
@@ -263,8 +269,11 @@ def material_search_bounds(
         if not np.isfinite(lo) or not np.isfinite(hi):
             raise ValueError(f"Biên dữ liệu {LABELS[k]} không hữu hạn.")
         lo = max(lo, 0.0)
+        if rules.material_limits and k in rules.material_limits:
+            user_lo, user_hi = rules.material_limits[k]
+            lo, hi = max(lo, user_lo), min(hi, user_hi)
         if k == "Xi_mang":
-            lo = max(lo, 1.0)  # vẫn là UHPC xi măng; không tối ưu nghiệm không xi măng
+            lo = max(lo, min_cement)  # Giới hạn xi măng do người dùng lựa chọn
             hi = min(hi, max_cement)
         if k == "Soi_thep":
             hi = min(hi, steel_cap)  # HARD CAP: không thể vượt kể cả khi model thích nhiều sợi
@@ -545,6 +554,7 @@ def optimize_mix(
     mode: str = "Nhanh",
     seed: int = 42,
     training: pd.DataFrame | None = None,
+    min_cement: float = 400.0,
 ) -> dict[str, Any]:
     """Tối ưu DE theo lô với tổ hợp chất liên kết cố định và kiểm tra hậu tối ưu.
 
@@ -557,8 +567,8 @@ def optimize_mix(
         raise ValueError("Cường độ mục tiêu phải dương.")
     if not (np.isfinite(age) and age > 0):
         raise ValueError("Tuổi dưỡng hộ phải dương.")
-    if not np.isfinite(max_cement) or max_cement <= 0:
-        raise ValueError("Giới hạn xi măng phải dương.")
+    if not (np.isfinite(min_cement) and np.isfinite(max_cement) and 0 < min_cement <= max_cement):
+        raise ValueError("Biên xi măng không hợp lệ: 0 < tối thiểu <= tối đa.")
     if mode not in {"Nhanh", "Chuyên sâu"}:
         raise ValueError("Chế độ tối ưu không hợp lệ.")
     missing = set(FEATURES_15) - set(training_bounds)
@@ -601,7 +611,7 @@ def optimize_mix(
         raise ValueError("Tối ưu có giới hạn khoảng cách cần assets/training_features.csv.")
 
     fiber_cap_kg = steel_limit_kg_m3(rules, densities["Soi_thep"])
-    bds = material_search_bounds(training_bounds, rules, max_cement, densities["Soi_thep"])
+    bds = material_search_bounds(training_bounds, rules, max_cement, densities["Soi_thep"], min_cement=min_cement)
     maxiter, popsize = (25, 7) if mode == "Nhanh" else (90, 12)
     dens_arr = np.array([densities[k] for k in MATERIALS], dtype=float)
     if not np.isfinite(dens_arr).all() or np.any(dens_arr <= 0):

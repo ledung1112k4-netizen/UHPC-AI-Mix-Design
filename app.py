@@ -616,7 +616,8 @@ with tab_inverse:
         left, mid, right = st.columns(3)
         target = left.number_input("Cường độ nén mục tiêu (MPa)", min_value=40.0, max_value=250.0, value=120.0, step=5.0)
         age = mid.number_input("Tuổi nén (ngày)", min_value=1, max_value=365, value=28, step=1)
-        max_cement = right.number_input("Xi măng tối đa (kg/m³)", min_value=1.0, max_value=1500.0, value=850.0, step=25.0)
+        min_cement = right.number_input("Xi măng tối thiểu (kg/m³)", min_value=1.0, max_value=1500.0, value=400.0, step=25.0)
+        max_cement = right.number_input("Xi măng tối đa (kg/m³)", min_value=1.0, max_value=1500.0, value=1000.0, step=25.0)
         mode = st.radio("Chế độ tìm kiếm", ["Nhanh", "Chuyên sâu"], horizontal=True)
         st.markdown("#### 🔎 Kiểm soát ngoại suy trong lúc tối ưu")
         safe_mode = st.radio(
@@ -652,6 +653,26 @@ with tab_inverse:
             c2, d2 = st.columns(2)
             air_percent = c2.number_input("Khí giả định (%)", min_value=0.0, max_value=15.0, value=2.0, step=0.5)
             vol_tol = d2.number_input("Sai số thể tích (m³)", min_value=0.005, max_value=0.1, value=0.02, step=0.005, format="%.3f")
+        st.markdown("#### 📐 Biên tối thiểu – tối đa của từng vật liệu (kg/m³)")
+        st.caption("Các biên là khoảng khảo sát do người dùng đặt, không phải tiêu chuẩn. "
+                   "Thuật toán lấy giao với miền huấn luyện; nếu không giao nhau sẽ báo không khả thi.")
+        material_limits_inverse = {}
+        for key in MATERIALS:
+            if key == "Xi_mang":
+                material_limits_inverse[key] = (float(min_cement), float(max_cement))
+                continue
+            default_lo, default_hi = {
+                "Tro_bay": (0., 300.), "Xil_lo_cao": (0., 400.),
+                "Silica_fume": (0., 250.), "Bot_thach_anh": (0., 350.),
+                "Cat": (500., 1200.), "Nuoc": (100., 250.),
+                "Phu_gia_sieu_deo": (0., 50.), "Soi_thep": (0., 160.),
+            }[key]
+            lcol, hcol = st.columns(2)
+            low = lcol.number_input(f"{LABELS[key]} — tối thiểu", min_value=0., max_value=3000.,
+                                    value=default_lo, step=5., key="inverse_low_" + key)
+            high = hcol.number_input(f"{LABELS[key]} — tối đa", min_value=0., max_value=3000.,
+                                     value=default_hi, step=5., key="inverse_high_" + key)
+            material_limits_inverse[key] = (float(low), float(high))
         st.markdown("#### 🧵 Giới hạn và ưu tiên giảm sợi thép")
         f_left, f_right = st.columns([1, 2])
         max_steel_pct = f_left.slider(
@@ -681,6 +702,7 @@ with tab_inverse:
     if run_opt:
         try:
             rules = DesignRules(
+                material_limits=material_limits_inverse,
                 wb_min=wb_min, wb_max=wb_max, air_fraction=air_percent / 100.0,
                 volume_tolerance=vol_tol, min_flyash=min_fa, min_ggbfs=min_gg,
                 margin_mpa=margin, binder_mode=binder_mode,
@@ -699,7 +721,7 @@ with tab_inverse:
             with st.spinner("Đang dự đoán theo lô và tìm cấp phối phù hợp tổ hợp đã chọn..."):
                 result = optimize_mix(
                     model, features, training_bounds, float(age), fixed, densities,
-                    rules, target, max_cement, mode=mode, training=training,
+                    rules, target, max_cement, mode=mode, training=training, min_cement=min_cement,
                 )
             st.session_state["inverse_result"] = result
             st.session_state["inverse_choice_key"] = choice_key
@@ -785,6 +807,58 @@ with tab_inverse:
 with tab_forward:
     st.subheader("Bài toán thuận — dự đoán từ cấp phối nhập vào")
     st.info("Bộ giá trị sẵn bên dưới là **cấp phối kiểm thử trong cell 23 của notebook**, không phải kết quả thực nghiệm được xác nhận. Bạn có thể sửa từng vật liệu.")
+    st.markdown("#### Giới hạn xi măng cho bài toán thuận")
+    cement_min_col, cement_max_col = st.columns(2)
+    with cement_min_col:
+        forward_cement_min = st.number_input("Xi măng tối thiểu (kg/m³)", min_value=0.0, max_value=1500.0, value=400.0, step=25.0, key="forward_cement_min")
+    with cement_max_col:
+        forward_cement_max = st.number_input("Xi măng tối đa (kg/m³)", min_value=0.0, max_value=1500.0, value=1000.0, step=25.0, key="forward_cement_max")
+    valid_cement_range = forward_cement_min <= forward_cement_max
+    if not valid_cement_range:
+        st.error("Biên xi măng không hợp lệ: tối thiểu lớn hơn tối đa.")
+    st.markdown("#### Giới hạn cốt liệu cho bài toán thuận")
+    st.caption("Giới hạn do người dùng lựa chọn, đơn vị kg/m³; không mặc định là yêu cầu tiêu chuẩn. "
+               "Áp dụng cho biến `Cat` (cát/cốt liệu), không bao gồm bột thạch anh và sợi thép.")
+    agg_min_col, agg_max_col = st.columns(2)
+    with agg_min_col:
+        forward_agg_min = st.number_input(
+            "Cốt liệu tối thiểu (kg/m³)", min_value=0.0, max_value=3000.0,
+            value=0.0, step=10.0, key="forward_agg_min")
+    with agg_max_col:
+        forward_agg_max = st.number_input(
+            "Cốt liệu tối đa (kg/m³)", min_value=0.0, max_value=3000.0,
+            value=2000.0, step=10.0, key="forward_agg_max")
+    valid_agg_range = forward_agg_min <= forward_agg_max
+    if "forward_result" in st.session_state:
+        old_mix = st.session_state["forward_result"][0]
+        if (not valid_agg_range or not (forward_agg_min <= old_mix["Cat"] <= forward_agg_max)
+                or not valid_cement_range or not (forward_cement_min <= old_mix["Xi_mang"] <= forward_cement_max)):
+            st.session_state.pop("forward_result", None)
+    if not valid_agg_range:
+        st.error("Giới hạn cốt liệu không hợp lệ: tối thiểu phải nhỏ hơn hoặc bằng tối đa.")
+    st.markdown("#### Biên cho tất cả vật liệu — bài toán thuận")
+    st.caption("Xi măng và cốt liệu vẫn dùng các biên đã nhập phía trên. "
+               "Các thành phần khác được kiểm tra trước khi dự đoán.")
+    forward_limits = {"Xi_mang": (forward_cement_min, forward_cement_max),
+                      "Cat": (forward_agg_min, forward_agg_max)}
+    for key in MATERIALS:
+        if key in forward_limits:
+            continue
+        default_lo, default_hi = {
+            "Tro_bay": (0., 300.), "Xil_lo_cao": (0., 400.),
+            "Silica_fume": (0., 250.), "Bot_thach_anh": (0., 350.),
+            "Nuoc": (100., 250.), "Phu_gia_sieu_deo": (0., 50.),
+            "Soi_thep": (0., 160.),
+        }[key]
+        lcol, hcol = st.columns(2)
+        low = lcol.number_input(f"{LABELS[key]} — tối thiểu (thuận)", min_value=0., max_value=3000.,
+                                value=default_lo, step=5., key="forward_low_" + key)
+        high = hcol.number_input(f"{LABELS[key]} — tối đa (thuận)", min_value=0., max_value=3000.,
+                                 value=default_hi, step=5., key="forward_high_" + key)
+        forward_limits[key] = (float(low), float(high))
+    invalid_forward_limits = [LABELS[k] for k, (lo, hi) in forward_limits.items() if lo > hi]
+    if invalid_forward_limits:
+        st.error("Giới hạn tối thiểu vượt tối đa: " + ", ".join(invalid_forward_limits))
     with st.form("forward"):
         mix = {}
         for i, key in enumerate(MATERIALS):
@@ -794,8 +868,21 @@ with tab_forward:
                 min_value=0.0, max_value=3000.0, value=float(NOTEBOOK_TEST_MIX[key]),
                 step=5.0, key="mix_" + key)
         forward_age = st.number_input("Tuổi dự đoán (ngày)", 1, 365, 28, 1)
-        submit_pred = st.form_submit_button("🧠 Dự đoán cường độ", type="primary", disabled=(model is None), use_container_width=True)
-    if submit_pred:
+        submit_pred = st.form_submit_button("🧠 Dự đoán cường độ", type="primary", disabled=(model is None or not valid_agg_range or not valid_cement_range or bool(invalid_forward_limits)), use_container_width=True)
+    if submit_pred and not (forward_cement_min <= mix["Xi_mang"] <= forward_cement_max):
+        st.session_state.pop("forward_result", None)
+        st.error(f"Xi măng {mix['Xi_mang']:,.2f} kg/m³ nằm ngoài biên [{forward_cement_min:,.2f}; {forward_cement_max:,.2f}] kg/m³.")
+    elif submit_pred and not (forward_agg_min <= mix["Cat"] <= forward_agg_max):
+        st.session_state.pop("forward_result", None)
+        st.error(f"Cốt liệu nhập vào {mix['Cat']:,.2f} kg/m³ nằm ngoài biên "
+                 f"[{forward_agg_min:,.2f}; {forward_agg_max:,.2f}] kg/m³. "
+                 "Hãy chỉnh lại cấp phối hoặc biên trước khi dự đoán.")
+    elif submit_pred and any(not (lo <= mix[key] <= hi) for key, (lo, hi) in forward_limits.items()):
+        st.session_state.pop("forward_result", None)
+        invalid = [f"{LABELS[key]}: {mix[key]:g} (biên {lo:g}–{hi:g})"
+                   for key, (lo, hi) in forward_limits.items() if not (lo <= mix[key] <= hi)]
+        st.error("Vật liệu nằm ngoài giới hạn: " + "; ".join(invalid))
+    elif submit_pred:
         try:
             yhat = predict(model, mix, forward_age, fixed, features)
             feat = feature_frame(pd.DataFrame([mix]), float(forward_age), fixed, features)
