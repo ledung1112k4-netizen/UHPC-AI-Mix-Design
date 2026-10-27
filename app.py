@@ -588,14 +588,14 @@ with tab_inverse:
     with st.expander("Silica fume và bột thạch anh — cài đặt riêng", expanded=True):
         csf, cqp = st.columns(2)
         silica_mode = csf.selectbox(
-            "Silica fume", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("off"),
+            "Silica fume", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("optional"),
             format_func=lambda value: POLICY_CHOICES[value], key="silica_policy_selector",
         )
         quartz_mode = cqp.selectbox(
-            "Bột thạch anh (chất độn)", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("off"),
+            "Bột thạch anh (chất độn)", list(POLICY_CHOICES), index=list(POLICY_CHOICES).index("optional"),
             format_func=lambda value: POLICY_CHOICES[value], key="quartz_policy_selector",
         )
-        st.caption("Bột thạch anh là chất độn, không được tính là chất liên kết trong W/B quy ước. Chọn 'Không sử dụng' sẽ cố định lượng vật liệu bằng 0 kg/m³.")
+        st.caption("Chọn Tùy chọn để AI tự tìm lượng vật liệu, kể cả 0 kg/m³; Bắt buộc để yêu cầu lượng dương; Không sử dụng để cố định 0 kg/m³. Bột thạch anh không thuộc W/B quy ước.")
 
     # Ẩn kết quả cũ nếu cài đặt thuộc tính vật liệu đã thay đổi.
     choice_key = (binder_mode, custom_fa, custom_gg, silica_mode, quartz_mode,
@@ -622,7 +622,7 @@ with tab_inverse:
         safe_mode = st.radio(
             "Phương pháp chọn cấp phối",
             ["Ưu tiên độ tin cậy (khuyến nghị)", "Khám phá có cảnh báo ngoại suy"],
-            index=1 if (silica_mode == "off" and quartz_mode == "off") else 0,
+            index=1,
             horizontal=False,
             help="Chế độ khuyến nghị buộc ứng viên phải có khoảng cách láng giềng "
                  "không vượt mốc P95 của các mẫu train cùng tuổi và cùng tổ hợp vật liệu. "
@@ -636,7 +636,7 @@ with tab_inverse:
                  "ít nhất có thể; luôn hiển thị kết quả model tính thật. "
                  "Nếu chưa có nghiệm gần mục tiêu, vẫn báo chính xác kết quả tìm được.",
         )
-        st.caption("Khám phá cho phép AI dự đoán ứng viên khi không có mẫu cùng tổ hợp. "
+        st.caption("Chế độ khám phá được chọn mặc định để cho phép các tổ hợp SF/bột thạch anh linh hoạt. Khám phá cho phép AI dự đoán ứng viên khi không có mẫu cùng tổ hợp. "
                    "Đây là ngoại suy chưa được kiểm chứng, không phải cấp phối đã đạt cường độ thực nghiệm.")
         with st.expander("Ràng buộc kỹ thuật — điều chỉnh theo đề tài và vật liệu thực tế"):
             a, b, c = st.columns(3)
